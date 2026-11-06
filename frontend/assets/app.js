@@ -40,6 +40,8 @@ const state = {
   active: null,
   attempt: null,
   runError: '',
+  chart: 'score',
+  chartWidth: 0,
 };
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -386,7 +388,7 @@ function compareView() {
   const head = `<header class="page-head"><div><h1>Compare</h1><p class="lead">Every model in one run, scored on the same tasks.</p></div>${picker}</header>`;
   const failure = state.runsError ? `<div class="empty"><p class="error" role="alert">${esc(state.runsError)}</p></div>` : '';
   if (!run) {
-    return { head, matrix: failure || '<div class="empty"><p>No runs to compare yet. Start a benchmark with two or more models.</p><a class="button" href="#bench">Set up a benchmark</a></div>', detail: '' };
+    return { head, charts: '', matrix: failure || '<div class="empty"><p>No runs to compare yet. Start a benchmark with two or more models.</p><a class="button" href="#bench">Set up a benchmark</a></div>', detail: '' };
   }
   const rows = run.models.map(model => {
     const lines = run.summary.filter(row => row.total && sameModel(row, model));
@@ -401,6 +403,7 @@ function compareView() {
   }).join('');
   return {
     head,
+    charts: chartsSection(run),
     matrix: `${failure}<section aria-label="Scores">
       <div class="block-head"><h2>Measured here</h2><span>${run.complete ? 'Exploratory smoke-test result' : 'No complete composite'}</span></div>
       ${scoreTable(run)}
@@ -414,6 +417,245 @@ function compareView() {
       </table></div>
     </section>` : '',
   };
+}
+
+/* Charts (Compare). Data derivation lives here; SVG builders are in charts.js. */
+const CHART_TABS = [
+  { id: 'score', label: 'Score' },
+  { id: 'time', label: 'Time per attempt' },
+  { id: 'speed', label: 'Output speed' },
+  { id: 'scatter', label: 'Score vs time' },
+  { id: 'families', label: 'Families' },
+];
+const chartLabelMax = () => (innerWidth < 640 ? 16 : 24);
+const chartGutter = () => Math.min(40, Math.max(16, innerWidth * 0.026));
+const chartWidthNow = () => Math.max(280, Math.round(app.clientWidth - 2 * chartGutter()));
+const chartHeight = width => Math.min(560, Math.max(360, width * 0.42));
+const chartMessage = text => `<p class="chart-empty" role="status">${esc(text)}</p>`;
+
+/* One pass over results and summary. Scores use composites when present; otherwise a partial mean. */
+function chartRecords(run) {
+  const timing = new Map();
+  for (const row of run.results) {
+    const key = `${row.endpoint}/${row.model}`;
+    let agg = timing.get(key);
+    if (!agg) timing.set(key, agg = { ok: 0, time: 0, tokens: 0, tokenTime: 0 });
+    if (row.status !== 'ok') continue;
+    const elapsed = Number(row.elapsed) || 0;
+    agg.ok += 1;
+    agg.time += elapsed;
+    if (Number.isInteger(row.tokens) && row.tokens > 0) {
+      agg.tokens += row.tokens;
+      agg.tokenTime += elapsed;
+    }
+  }
+  const sums = new Map();
+  for (const row of run.summary) {
+    if (row.category === 'Writing' || row.score === null || row.score === undefined) continue;
+    const key = `${row.endpoint}/${row.model}`;
+    const sum = sums.get(key) || { total: 0, count: 0 };
+    sum.total += row.score;
+    sum.count += 1;
+    sums.set(key, sum);
+  }
+  const slots = new Map();
+  for (const model of run.models) {
+    const family = chartFamily(model.model);
+    if (!slots.has(family)) slots.set(family, slots.size % 8 + 1);
+  }
+  const counts = new Map();
+  for (const model of run.models) counts.set(model.model, (counts.get(model.model) || 0) + 1);
+  return run.models.map(model => {
+    const key = `${model.endpoint}/${model.model}`;
+    const agg = timing.get(key) || { ok: 0, time: 0, tokens: 0, tokenTime: 0 };
+    const sum = sums.get(key);
+    const composite = run.composites[key];
+    const partial = composite === undefined && Boolean(sum);
+    const score = composite !== undefined ? composite : sum ? sum.total / sum.count : null;
+    const tail = model.model.split('/').pop();
+    const family = chartFamily(model.model);
+    return {
+      key,
+      endpoint: model.endpoint,
+      model: model.model,
+      family,
+      slot: slots.get(family),
+      label: counts.get(model.model) > 1 ? `${model.endpoint} · ${tail}` : tail,
+      score,
+      partial,
+      time: agg.ok ? agg.time / agg.ok : null,
+      speed: agg.tokenTime > 0 ? agg.tokens / agg.tokenTime : null,
+    };
+  });
+}
+
+const chartFillFor = record => `--chart-${record.slot}`;
+const chartFullName = record => `${record.endpoint} · ${record.model}`;
+const scatterSet = records => records.filter(record => record.score !== null && record.time !== null && record.time > 0);
+
+function familyCounts(records) {
+  const counts = new Map();
+  for (const record of records) counts.set(record.family, (counts.get(record.family) || 0) + 1);
+  return counts;
+}
+
+function familyLegend(records) {
+  const seen = new Map();
+  for (const record of records) if (!seen.has(record.family)) seen.set(record.family, record.slot);
+  return [...seen].map(([family, slot]) => ({ kind: 'swatch', fillVar: `--chart-${slot}`, text: family }));
+}
+
+function sortItems(items, descending) {
+  return items.sort((a, b) => (descending ? b.value - a.value : a.value - b.value) || a.label.localeCompare(b.label));
+}
+
+function notPlotted(records, reason) {
+  return records.length ? `<p class="note">Not plotted: ${records.map(record => `${esc(record.label)} (${reason(record)})`).join(', ')}.</p>` : '';
+}
+
+const barAria = (metric, items, format) => `${metric}, ${items.length} models. First: ${items[0].label}, ${format(items[0])}.`;
+
+function localPanel(records, tab) {
+  const width = state.chartWidth;
+  const labelMax = chartLabelMax();
+  const withScore = records.filter(record => record.score !== null);
+  const withTime = records.filter(record => record.time !== null && record.time > 0);
+  const withSpeed = records.filter(record => record.speed !== null);
+  const scatter = scatterSet(records);
+
+  if (tab === 'score') {
+    if (!withScore.length) return { desc: 'Score per model on a fixed 0–100 scale.', body: chartMessage('Charts appear here as answers are graded.'), legend: '', note: '' };
+    const items = sortItems(withScore.map(record => ({
+      label: record.label,
+      value: record.score,
+      valueText: `${Math.round(record.score)}%`,
+      fillVar: chartFillFor(record),
+      partial: record.partial,
+      title: `${chartFullName(record)}: ${Math.round(record.score)}% ${record.partial ? '(partial mean, not a composite)' : '(composite)'}`,
+    })), true);
+    const legend = [...familyLegend(withScore), ...(withScore.some(record => record.partial) ? [{ kind: 'hatch', text: 'Partial, not a composite' }] : [])];
+    return {
+      desc: 'Mean score per model on a fixed 0–100 scale. Solid bars are composites from complete runs. Checkered bars are partial: the mean of graded categories, not a composite.',
+      body: chartBarsSVG({ items, width, max: 100, signalBelow: 50, labelMax, ariaLabel: barAria('Score', items, item => item.valueText) }),
+      legend: chartLegendHTML(legend),
+      note: notPlotted(records.filter(record => record.score === null), () => 'no graded attempts'),
+    };
+  }
+
+  if (tab === 'time') {
+    if (!withTime.length) return { desc: 'Seconds per successful attempt.', body: chartMessage('Charts appear here once attempts succeed.'), legend: '', note: '' };
+    const items = sortItems(withTime.map(record => ({
+      label: record.label,
+      value: record.time,
+      valueText: chartSeconds(record.time),
+      fillVar: chartFillFor(record),
+      partial: false,
+      title: `${chartFullName(record)}: ${chartSeconds(record.time)} mean per successful attempt`,
+    })), false);
+    return {
+      desc: 'Mean seconds per successful attempt, lower is better. Failed attempts are excluded so instant errors do not look fast.',
+      body: chartBarsSVG({ items, width, max: chartNiceCeil(Math.max(...items.map(item => item.value))), labelMax, ariaLabel: barAria('Seconds per attempt', items, item => item.valueText) }),
+      legend: chartLegendHTML(familyLegend(withTime)),
+      note: notPlotted(records.filter(record => record.time === null || record.time <= 0), () => 'no successful attempts'),
+    };
+  }
+
+  if (tab === 'speed') {
+    const desc = 'Completion tokens per second over the whole request, including time before the first token. Uses only token counts the endpoint reported.';
+    if (!withSpeed.length) return { desc, body: chartMessage('This run reported no token usage.'), legend: '', note: '' };
+    const items = sortItems(withSpeed.map(record => ({
+      label: record.label,
+      value: record.speed,
+      valueText: `${record.speed.toFixed(1)} tok/s`,
+      fillVar: chartFillFor(record),
+      partial: false,
+      title: `${chartFullName(record)}: ${record.speed.toFixed(1)} tokens/s`,
+    })), true);
+    return {
+      desc,
+      body: chartBarsSVG({ items, width, max: chartNiceCeil(Math.max(...items.map(item => item.value))), labelMax, ariaLabel: barAria('Output speed', items, item => item.valueText) }),
+      legend: chartLegendHTML(familyLegend(withSpeed)),
+      note: notPlotted(records.filter(record => record.speed === null), () => 'no token usage'),
+    };
+  }
+
+  // Score vs time and Families share one scatter. Families only reshapes the marks.
+  const families = familyCounts(scatter);
+  const familiesTab = tab === 'families';
+  if (!scatter.length) return { desc: 'Score against time per attempt. Each dot is one model.', body: chartMessage('Charts appear here once a model has both a score and a successful attempt.'), legend: '', note: '' };
+  const points = scatter.map(record => {
+    const faded = familiesTab && (families.get(record.family) || 0) < 2;
+    return {
+      x: record.time,
+      y: record.score,
+      fillVar: faded ? '--chart-other' : chartFillFor(record),
+      shape: 'circle',
+      partial: record.partial,
+      muted: faded,
+      opacity: faded ? 0.35 : 1,
+      label: record.label,
+      title: `${chartFullName(record)}: ${Math.round(record.score)}%, ${chartSeconds(record.time)} per attempt${record.partial ? ' (partial, not a composite)' : ''}`,
+    };
+  });
+  const lines = familiesTab
+    ? [...families.keys()].filter(family => families.get(family) >= 2).map(family => {
+        const members = scatter.filter(record => record.family === family).sort((a, b) => a.time - b.time);
+        return { fillVar: chartFillFor(members[0]), points: members.map(record => ({ x: record.time, y: record.score })) };
+      })
+    : [];
+  const legend = [
+    { kind: 'best', text: 'Best quadrant' },
+    { kind: 'dotted', text: 'Pareto line (this run only)' },
+    ...(familiesTab ? familyLegend(scatter.filter(record => families.get(record.family) >= 2)).map(item => ({ ...item, kind: 'dot' })) : familyLegend(scatter).map(item => ({ ...item, kind: 'dot' }))),
+    ...(scatter.some(record => record.partial) ? [{ kind: 'ring', text: 'Partial, not a composite' }] : []),
+    ...(familiesTab && families.size && [...families.values()].some(count => count < 2) ? [{ kind: 'swatch', fillVar: '--chart-other', text: 'Other models' }] : []),
+  ];
+  return {
+    desc: familiesTab
+      ? 'Same axes as Score vs time. Models from the same family are joined. Other models are faded.'
+      : 'Score against mean time per successful attempt. The best quadrant is top left. The dotted line joins models that no other model beats on both time and score in this run.',
+    body: chartScatterSVG({
+      points,
+      lines,
+      width,
+      height: chartHeight(width),
+      xTitle: 'Time per attempt (seconds, log scale)',
+      yTitle: 'Score (%)',
+      yMax: 100,
+      yTicks: [0, 20, 40, 60, 80, 100],
+      xFormat: chartSeconds,
+      bestSide: 'left',
+      pareto: true,
+      labelMax,
+      ariaLabel: `${familiesTab ? 'Families' : 'Score against time'}, ${points.length} models plotted. Best quadrant is top left.`,
+    }),
+    legend: chartLegendHTML(legend),
+    note: notPlotted(records.filter(record => !scatter.includes(record)), record => (record.score === null ? 'no graded attempts' : 'no successful attempts')),
+  };
+}
+
+function chartsSection(run) {
+  const records = chartRecords(run);
+  const families = familyCounts(scatterSet(records));
+  const hasFamilies = [...families.values()].some(count => count >= 2);
+  const current = state.chart === 'families' && !hasFamilies ? 'score' : state.chart;
+  const panel = localPanel(records, current);
+  const tabs = CHART_TABS.filter(tab => tab.id !== 'families' || hasFamilies)
+    .map(tab => `<button type="button" class="chart-tab" data-chart="${tab.id}" data-key="chart-${tab.id}" aria-pressed="${current === tab.id}">${esc(tab.label)}</button>`)
+    .join('');
+  return `<section class="charts" aria-label="Charts">
+    <div class="block-head"><h2>Charts</h2><span>Scores and timings from this run only</span></div>
+    <div class="chart-groups">
+      <div class="chart-group">
+        <span class="chart-group-label" id="chart-group-run">This run</span>
+        <div class="chart-tabs" role="group" aria-labelledby="chart-group-run">${tabs}</div>
+      </div>
+    </div>
+    <p class="chart-desc">${esc(panel.desc)}</p>
+    ${panel.legend ? `<div class="chart-legend legend">${panel.legend}</div>` : ''}
+    <div class="chart-body">${panel.body}</div>
+    ${panel.note ? `<div class="block-foot">${panel.note}</div>` : ''}
+  </section>`;
 }
 
 /* Data */
@@ -521,6 +763,9 @@ document.addEventListener('click', async event => {
   const remove = target.closest('.remove');
   if (remove) { state.endpoints.splice(Number(remove.dataset.i), 1); render(); return; }
 
+  const chartTab = target.closest('[data-chart]');
+  if (chartTab) { state.chart = chartTab.dataset.chart; render(); return; }
+
   const attempt = target.closest('[data-attempt]');
   if (attempt) { state.attempt = Number(attempt.dataset.attempt); render(); return; }
 
@@ -613,6 +858,18 @@ addEventListener('hashchange', syncRoute);
 (async () => {
   checkHealth();
   setInterval(checkHealth, 30000);
+  state.chartWidth = chartWidthNow();
+  let chartFrame = 0;
+  new ResizeObserver(() => {
+    cancelAnimationFrame(chartFrame);
+    chartFrame = requestAnimationFrame(() => {
+      const next = chartWidthNow();
+      // Ignore changes under 8px so a scrollbar appearing does not start a repaint loop.
+      if (Math.abs(next - state.chartWidth) < 8) return;
+      state.chartWidth = next;
+      if (route().view === 'compare') render();
+    });
+  }).observe(app);
   setInterval(async () => {
     if (route().view !== 'runs' || !state.runs.some(run => !TERMINAL.has(run.state))) return;
     await loadRuns();
