@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      - "127.0.0.1:${BENCH_PORT:-8080}:8000"
+      - "${BENCH_BIND:-127.0.0.1}:${BENCH_PORT:-8080}:8000"
     environment:
       DATA_DIR: /data
     volumes:
