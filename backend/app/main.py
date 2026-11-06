@@ -70,7 +70,7 @@ def initialize() -> None:
 class Endpoint(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=8, max_length=500)
-    models: list[str] = Field(min_length=1, max_length=10)
+    models: list[str] = Field(min_length=1)
 
     @field_validator('url')
     @classmethod
@@ -83,7 +83,7 @@ class Endpoint(BaseModel):
         return value.rstrip('/')
 
 class RunRequest(BaseModel):
-    endpoints: list[Endpoint] = Field(min_length=1, max_length=4)
+    endpoints: list[Endpoint] = Field(min_length=1)
     depth: str = 'Quick'
     categories: list[str] = CATEGORIES
     @field_validator('depth')
@@ -193,7 +193,7 @@ def serialize_run(run_id: str) -> dict[str, Any]:
             composites[e['endpoint'] + '/' + e['model']] = round(sum(x['score'] for x in summaries if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing') / 6, 1)
     return {'id': run['id'], 'created': run['created'], 'depth': run['depth'], 'state': run['state'],
             'progress': run['progress'], 'total': run['total'], 'models': config['models'],
-            'categories': CATEGORIES, 'results': rows, 'summary': summaries, 'composites': composites,
+            'categories': config.get('categories', CATEGORIES), 'results': rows, 'summary': summaries, 'composites': composites,
             'complete': complete, 'events': data.get('events', [])[-20:], 'error': run['error']}
 
 async def execute_run(run_id: str) -> None:
@@ -379,7 +379,6 @@ async def create_run(payload: RunRequest, request: Request):
     if not categories or any(category not in CATEGORIES for category in categories):
         raise HTTPException(422, 'Select at least one supported category.')
     models = [{'endpoint': e.name, 'model': m} for e in payload.endpoints for m in e.models]
-    if len(models) > 8: raise HTTPException(422, 'Select no more than eight models per run.')
     if len(models) != len({(x['endpoint'], x['model']) for x in models}): raise HTTPException(422, 'Duplicate model selection.')
     # Verify IDs against the live discovered endpoint before accepting a run.
     for endpoint in payload.endpoints:

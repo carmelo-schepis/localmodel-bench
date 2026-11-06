@@ -133,6 +133,16 @@ function selectedModels() {
   return state.endpoints.reduce((sum, endpoint) => sum + endpoint.models.length, 0);
 }
 
+/* A model that appears on more than one device is only benchmarked once. */
+const endpointHasModel = (endpoint, modelId) => endpoint.found.some(model => model.id === modelId);
+const endpointSelectsModel = (endpoint, modelId) => endpoint.models.includes(modelId);
+function duplicateDevice(index, modelId) {
+  return state.endpoints.find((endpoint, other) => other !== index && endpointHasModel(endpoint, modelId)) || null;
+}
+function selectedDevice(index, modelId) {
+  return state.endpoints.find((endpoint, other) => other !== index && endpointSelectsModel(endpoint, modelId)) || null;
+}
+
 function plannedAttempts() {
   const depth = DEPTHS[state.depth];
   const objective = state.categories.filter(name => name !== 'Writing').length;
@@ -144,8 +154,6 @@ function startBlocker() {
   const count = selectedModels();
   const chosen = state.endpoints.filter(endpoint => endpoint.models.length);
   if (!count) return 'Choose one or more models to begin.';
-  if (count > 8) return 'Choose eight models or fewer for one run.';
-  if (chosen.length > 4) return 'Choose models from four endpoints or fewer.';
   if (new Set(chosen.map(endpoint => endpoint.name)).size < chosen.length) return 'Give each endpoint a different name.';
   if (!state.categories.length) return 'Choose at least one category.';
   return '';
@@ -182,16 +190,24 @@ function benchView() {
 }
 
 function endpointSection(endpoint, index) {
-  const rows = endpoint.found.map(model => `<li><label class="check">
-      <input type="checkbox" data-key="model-${index}-${esc(model.id)}" data-endpoint="${index}" value="${esc(model.id)}" ${endpoint.models.includes(model.id) ? 'checked' : ''}>
+  const duplicates = endpoint.found.filter(model => !endpointSelectsModel(endpoint, model.id) && duplicateDevice(index, model.id)).length;
+  const rows = endpoint.found.map(model => {
+    const duplicate = duplicateDevice(index, model.id);
+    const owner = selectedDevice(index, model.id);
+    const checked = endpointSelectsModel(endpoint, model.id);
+    // A duplicate stays unticked, and cannot be ticked while another device holds it.
+    const locked = !checked && owner;
+    return `<li><label class="check${locked ? ' is-duplicate' : ''}">
+      <input type="checkbox" data-key="model-${index}-${esc(model.id)}" data-endpoint="${index}" value="${esc(model.id)}" ${checked ? 'checked' : ''} ${locked ? `disabled title="${esc(model.id)} is already selected on ${esc(owner.name)}"` : ''}>
       <code>${esc(model.id)}</code>
-      <small>${esc(model.owned_by || '')}</small>
-    </label></li>`).join('');
+      <small>${duplicate ? `also on ${esc(duplicate.name)}` : esc(model.owned_by || '')}</small>
+    </label></li>`;
+  }).join('');
   return `<section class="endpoint" aria-label="${esc(endpoint.name)}">
     <header class="endpoint-head">
       <strong>${esc(endpoint.name)}</strong>
       <code>${esc(endpoint.url)}</code>
-      <span>${endpoint.models.length} of ${endpoint.found.length} selected</span>
+      <span>${endpoint.models.length} of ${endpoint.found.length} selected${duplicates ? ` · ${plural(duplicates, 'duplicate')} unticked` : ''}</span>
       <button class="button quiet remove" data-i="${index}" aria-label="Remove ${esc(endpoint.name)}">Remove</button>
     </header>
     ${rows ? `<ul class="model-rows">${rows}</ul>` : '<p class="start-hint">This endpoint lists no models.</p>'}
@@ -353,7 +369,10 @@ function errorCounts(run) {
 
 function scoreTable(run) {
   const errorsIn = errorCounts(run);
-  const categories = CATEGORIES.filter(name => run.summary.some(row => row.category === name && row.total));
+  // Show every category chosen for the run from the start, so the whole grid is
+  // visible while results stream in instead of appearing one category at a time.
+  const selected = Array.isArray(run.categories) && run.categories.length ? run.categories : CATEGORIES;
+  const categories = CATEGORIES.filter(name => selected.includes(name));
   if (!categories.length) return '<p class="empty">Scores appear here as answers are graded.</p>';
   const rows = run.models.map(model => {
     const cells = categories.map(category => {
@@ -982,7 +1001,9 @@ document.addEventListener('input', event => {
 document.addEventListener('change', async event => {
   const target = event.target;
   if (target.dataset.endpoint !== undefined) {
-    const endpoint = state.endpoints[Number(target.dataset.endpoint)];
+    const index = Number(target.dataset.endpoint);
+    const endpoint = state.endpoints[index];
+    if (target.checked && selectedDevice(index, target.value)) { render(); return; }
     endpoint.models = target.checked ? [...new Set([...endpoint.models, target.value])] : endpoint.models.filter(id => id !== target.value);
     render();
   } else if (target.dataset.category) {
@@ -1008,7 +1029,10 @@ document.addEventListener('submit', async event => {
     const result = await api('/models', { method: 'POST', body: JSON.stringify({ name: data.get('name'), url: data.get('url') }) });
     const existing = state.endpoints.findIndex(item => item.url === result.url);
     if (existing !== -1) state.endpoints.splice(existing, 1);
-    state.endpoints.push({ name: result.name, url: result.url, models: result.models.map(model => model.id), found: result.models });
+    // Untick any model another device already lists, so each model is tested once.
+    const detectedElsewhere = new Set(state.endpoints.flatMap(item => item.found.map(model => model.id)));
+    const models = result.models.map(model => model.id).filter(id => !detectedElsewhere.has(id));
+    state.endpoints.push({ name: result.name, url: result.url, models, found: result.models });
     state.draft = { name: null, url: '' };
   } catch (error) {
     state.connectError = error.message;
