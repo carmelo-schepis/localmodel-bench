@@ -140,14 +140,15 @@ def serialize_run(run_id: str) -> dict[str, Any]:
         rows = [dict(r) for r in db.execute('SELECT * FROM results WHERE run_id=? ORDER BY rowid', (run_id,))]
     data = json.loads(run['data'])
     summaries = []
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        grouped.setdefault(row['model'], []).append(row)
+        grouped.setdefault((row['endpoint'], row['model']), []).append(row)
     for model, items in grouped.items():
+        endpoint, model_id = model
         for category in CATEGORIES:
             relevant = [r for r in items if r['category'] == category]
             graded = [r for r in relevant if r['score'] is not None]
-            summaries.append({'model': model, 'category': category,
+            summaries.append({'endpoint': endpoint, 'model': model_id, 'category': category,
                 'score': round(sum(r['score'] for r in graded) / len(graded) * 100, 1) if graded else None,
                 'coverage': len(graded), 'total': len(relevant),
                 'elapsed': round(sum(r['elapsed'] or 0 for r in relevant), 2),
@@ -155,12 +156,12 @@ def serialize_run(run_id: str) -> dict[str, Any]:
                 'ungraded': sum(1 for r in relevant if r['score'] is None)})
     config = json.loads(run['config'])
     complete = run['state'] == 'completed' and run['progress'] == run['total'] and all(
-        sum(1 for x in summaries if x['model'] == e['model'] and x['category'] != 'Writing' and x['coverage'] == x['total'] and x['total']) == 6
+        sum(1 for x in summaries if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing' and x['coverage'] == x['total'] and x['total']) == 6
         for e in config['models'])
     composites = {}
     if complete:
         for e in config['models']:
-            composites[e['model']] = round(sum(x['score'] for x in summaries if x['model'] == e['model'] and x['category'] != 'Writing') / 6, 1)
+            composites[e['endpoint'] + '/' + e['model']] = round(sum(x['score'] for x in summaries if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing') / 6, 1)
     return {'id': run['id'], 'created': run['created'], 'depth': run['depth'], 'state': run['state'],
             'progress': run['progress'], 'total': run['total'], 'models': config['models'],
             'categories': CATEGORIES, 'results': rows, 'summary': summaries, 'composites': composites,

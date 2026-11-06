@@ -34,6 +34,19 @@ class StorageTests(unittest.TestCase):
                 db.execute("INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, 'one', 'm', 'Coding', '?', '2', 1, .1, 1, 'ok'))
             self.assertEqual(main.serialize_run(run_id)['composites'], {})
 
+    def test_same_model_on_two_endpoints_keeps_separate_rows(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            run_id = 'two-endpoints'
+            with main.connect_db() as db:
+                db.execute("INSERT INTO runs(id,created,depth,state,config) VALUES(?,?,?,?,?)", (run_id, 'today', 'Quick', 'running', json.dumps({'models': [], 'endpoints': [], 'categories': main.CATEGORIES})))
+                for endpoint in ('lab-a', 'lab-b'):
+                    db.execute("INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, endpoint, 'qwen3:8b', 'Knowledge', '?', '3', 1, .1, 1, 'ok'))
+            summary = main.serialize_run(run_id)['summary']
+            scored = [row for row in summary if row['total']]
+            self.assertEqual({row['endpoint'] for row in scored}, {'lab-a', 'lab-b'})
+            self.assertEqual([row['score'] for row in scored], [100, 100])
+
 
 if __name__ == '__main__':
     unittest.main()
