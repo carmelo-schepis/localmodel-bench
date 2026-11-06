@@ -38,6 +38,8 @@ Set `DATA_DIR` to a writable directory when running outside Docker. Run `python 
 
 Discovery uses `GET {base}/models`; inference uses streaming `POST {base}/chat/completions`. Model URLs are entered in the browser and requested by the server. The app does not forward prompts to Artificial Analysis. Keep the UI on a trusted local network. Endpoint URLs and responses are stored in your local database volume.
 
+Discovery checks Ollama's `/api/show` capabilities and excludes models without completion support, including embedding-only models. Run creation repeats this check so stale selections cannot submit those models. If a compatible server does not expose this metadata (404/405 or no capabilities field), its listed models remain available; inference errors include the server's error message when provided.
+
 ## Bundled font
 
 The interface ships [Mona Sans](https://github.com/github/mona-sans) in `frontend/assets/fonts`, so it makes no external font requests. The font is licensed under the SIL Open Font License; see `frontend/assets/fonts/OFL.txt`.

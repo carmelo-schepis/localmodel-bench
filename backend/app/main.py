@@ -98,6 +98,15 @@ class ConnectRequest(BaseModel):
         return Endpoint.validate_url(value)
 
 def safe_error(err: Exception) -> str:
+    if isinstance(err, httpx.HTTPStatusError):
+        try:
+            detail = err.response.json().get('error')
+            if isinstance(detail, dict):
+                detail = detail.get('message')
+            if isinstance(detail, str) and detail.strip():
+                return f'HTTP {err.response.status_code}: {detail}'[:240]
+        except (ValueError, AttributeError):
+            pass
     return (str(err) or err.__class__.__name__)[:240]
 
 async def models_for(url: str) -> list[dict[str, Any]]:
@@ -106,7 +115,23 @@ async def models_for(url: str) -> list[dict[str, Any]]:
         response = await client.get(url + '/models')
         response.raise_for_status()
         items = response.json().get('data', [])
-        return [{'id': item['id'], 'owned_by': item.get('owned_by', 'unknown')} for item in items if isinstance(item, dict) and item.get('id')]
+        models = []
+        # The OpenAI model list includes embedding-only models. Ollama's native
+        # metadata identifies which models can serve chat completion requests.
+        show_url = url.removesuffix('/v1') + '/api/show'
+        for item in items:
+            if not isinstance(item, dict) or not item.get('id'):
+                continue
+            metadata = await client.post(show_url, json={'model': item['id']})
+            # Some compatible servers/proxies expose only /v1, and older Ollama
+            # versions omit capabilities. Preserve discovery when unknown.
+            if metadata.status_code not in (404, 405):
+                metadata.raise_for_status()
+                capabilities = metadata.json().get('capabilities')
+                if isinstance(capabilities, list) and 'completion' not in capabilities:
+                    continue
+            models.append({'id': item['id'], 'owned_by': item.get('owned_by', 'unknown')})
+        return models
 
 def normalized(text: str) -> str:
     return re.sub(r'\s+', '', text).lower()
@@ -281,7 +306,7 @@ async def create_run(payload: RunRequest, request: Request):
     for endpoint in payload.endpoints:
         known = {item['id'] for item in await models_for(endpoint.url)}
         unknown = set(endpoint.models) - known
-        if unknown: raise HTTPException(422, f"Model(s) no longer available at {endpoint.name}: {', '.join(sorted(unknown))}")
+        if unknown: raise HTTPException(422, f"Model(s) unavailable or do not support chat at {endpoint.name}: {', '.join(sorted(unknown))}")
     run_id = str(uuid.uuid4()); created = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     config = {'endpoints': [e.model_dump() for e in payload.endpoints], 'models': models, 'categories': categories}
     with connect_db() as db:
