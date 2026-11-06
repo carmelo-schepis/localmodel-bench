@@ -1,0 +1,21 @@
+services:
+  bench:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "127.0.0.1:${BENCH_PORT:-8080}:8000"
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - bench-data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    pids_limit: 128
+volumes:
+  bench-data:
