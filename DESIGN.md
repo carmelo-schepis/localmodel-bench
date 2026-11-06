@@ -51,6 +51,16 @@ A lane shows at most 240 marks. Larger runs group attempts into one mark that sh
 - **Run (`#run/<id>`):** Heading and progress, the tape, then scores beside the attempt inspector.
 - **Compare:** A run picker, the score matrix, and timing and tokens per category.
 
+## Compare charts
+
+Compare shows one chart at a time, chosen by a tab row, above the score matrix and timing table. The tables stay as the accessible data view.
+
+- **Colour exception.** Chart marks may use the `--chart-1` to `--chart-8` and `--chart-other` tokens, one colour per model family, assigned by first appearance. Interface text, rules, backgrounds and tab controls stay monochrome. Do not use `--signal` or red-pink hues for a series.
+- **Partial results.** A checkered fill or hollow ring means a partial mean, not a composite. Never label a partial mean as a composite.
+- **Scales.** Score is always 0–100 and never truncated. Time and speed start at zero. Scatter x axes are logarithmic and labelled.
+- **Frontier.** The dotted Pareto line describes this run only. Do not present it as a general frontier.
+- **Labels.** Every mark has a text label and an SVG `<title>`. Colour never carries meaning alone.
+
 ## Writing
 
 Use sentence case and plain verbs. Keep an action's name the same through the flow. Name results for what the grader did: "Match" and "No match", not "Pass" and "Fail". Keep the smoke-test notices wherever scores appear; they state real limits of this release.

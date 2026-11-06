@@ -18,6 +18,19 @@
   --line-2: #383838;
   --wash: #101010;
   --signal: #ff5c7a;
+  /* Chart marks only. Interface text and rules stay monochrome (see DESIGN.md). */
+  --chart-1: #4c8dff;
+  --chart-2: #ff8a1f;
+  --chart-3: #2fbf71;
+  --chart-4: #d08068;
+  --chart-5: #9b87f5;
+  --chart-6: #5cc8ff;
+  --chart-7: #f2c94c;
+  --chart-8: #2dd4bf;
+  --chart-other: #8a8a8a;
+  --lab-openai: #e8e8e8;
+  --lab-anthropic: #d08068;
+  --lab-xai: #9b87f5;
   --gutter: clamp(16px, 2.6vw, 40px);
   --topbar: 56px;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -353,6 +366,53 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 .detail tbody th { vertical-align: top; color: var(--ink); font-size: 15px; font-weight: 400; white-space: normal; }
 .detail tbody th small { display: block; color: var(--ink-3); font-size: 12px; }
 .detail tbody th code { font-size: 13px; overflow-wrap: anywhere; }
+
+/* Charts (Compare) */
+.charts .block-head { padding-bottom: 16px; }
+.chart-groups { display: flex; flex-wrap: wrap; gap: 16px 32px; padding: 0 var(--gutter); }
+.chart-group-label { display: block; margin-bottom: 8px; color: var(--ink-3); font-size: 13px; }
+.chart-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.chart-tab { min-height: 40px; padding: 0 14px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.chart-tab + .chart-tab { border-left: 1px solid var(--line-2); }
+.chart-tab:hover { color: var(--ink); }
+.chart-tab[aria-pressed="true"] { background: var(--ink); color: var(--black); font-weight: 600; }
+.chart-tab:focus-visible { outline-offset: -4px; outline-color: var(--ink-3); }
+.chart-desc { margin-top: 20px; padding: 0 var(--gutter); max-width: 80ch; color: var(--ink-2); font-size: 13px; }
+.chart-legend { margin-top: 12px; padding: 0 var(--gutter); row-gap: 8px; }
+.legend .chart-key { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 2px; }
+.legend .chart-key.is-dot { border-radius: 50%; }
+.legend .chart-key.is-diamond { width: 8px; height: 8px; transform: rotate(45deg); }
+.legend .chart-key.is-hatch { background: repeating-conic-gradient(#8a8a8a 0 25%, #222 0 50%) 0 0 / 8px 8px; }
+.legend .chart-key.is-ring { border: 2px solid var(--ink-2); background: transparent; }
+.legend .chart-key.is-best { width: 14px; height: 10px; background: rgba(47, 191, 113, .25); }
+.legend .chart-key.is-dotted { width: 16px; height: 0; border-top: 2px dotted var(--ink); border-radius: 0; }
+.chart-body { padding: 16px var(--gutter) 0; }
+.chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart-svg text { font-family: var(--mono); font-size: 12px; fill: var(--ink-2); }
+.chart-svg .chart-value { font-family: "Mona Sans", sans-serif; font-size: 13px; font-weight: 600; fill: var(--ink); }
+.chart-svg .chart-value.is-inside { fill: #000; }
+.chart-svg .chart-value.is-signal { fill: var(--signal); }
+.chart-svg .chart-label.is-muted { fill: var(--ink-3); }
+.chart-svg .chart-tick { fill: var(--ink-3); font-size: 11px; }
+.chart-svg .chart-axis-title { font-family: "Mona Sans", sans-serif; font-size: 12px; fill: var(--ink-3); }
+.chart-svg .chart-foot { font-family: "Mona Sans", sans-serif; font-size: 12px; fill: var(--ink-3); }
+.chart-svg a text { fill: var(--ink-2); text-decoration: underline; text-underline-offset: 3px; }
+.chart-svg .chart-grid { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 3 5; }
+.chart-svg .chart-axis { stroke: var(--line-2); stroke-width: 1; }
+.chart-svg .chart-best { fill: rgba(47, 191, 113, .13); }
+.chart-svg .chart-wash { fill: var(--wash); }
+.chart-svg .chart-pareto { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 1 4; stroke-linecap: round; }
+.chart-svg .chart-hollow { fill: none; stroke-width: 2; }
+.chart-svg .chart-family-line { fill: none; stroke-width: 2; }
+.chart-empty { margin: 0; padding: 24px var(--gutter); color: var(--ink-2); }
+.chart-warn { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
 
 /* Narrower screens */
 @media (max-width: 1320px) {
