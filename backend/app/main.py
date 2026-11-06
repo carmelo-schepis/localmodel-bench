@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -9,15 +10,18 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+
+from . import references
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,10 +277,85 @@ async def execute_run(run_id: str) -> None:
     with connect_db() as db:
         db.execute("UPDATE runs SET state='completed' WHERE id=?", (run_id,))
 
+AA_KEY = os.getenv('AA_API_KEY', '').strip()
+def refresh_seconds() -> int:
+    try:
+        minutes = int(os.getenv('AA_REFRESH_MINUTES', '180'))
+    except ValueError:
+        minutes = 180
+    return min(1440, max(60, minutes)) * 60
+
+AA_INTERVAL = refresh_seconds()
+AA_STALE_SECONDS = 24 * 3600
+aa_log = logging.getLogger('bench.aa')
+
+def utc_now() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+def read_setting(key: str) -> Any:
+    with connect_db() as db:
+        row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    return json.loads(row['value']) if row else None
+
+def write_settings(pairs: list[tuple[str, Any]]) -> None:
+    # One transaction, so a changed snapshot and its status land together.
+    with connect_db() as db:
+        for key, value in pairs:
+            db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
+
+def clear_reference_settings() -> None:
+    with connect_db() as db:
+        db.execute("DELETE FROM settings WHERE key IN ('aa_snapshot','aa_status')")
+
+async def refresh_once(api_key: str) -> None:
+    now = time.time()
+    stamp = utc_now()
+    status = read_setting('aa_status') or {}
+    previous = read_setting('aa_snapshot')
+    try:
+        fetched = await references.fetch_snapshot(api_key)
+        rows = fetched['rows']
+        references.check_size(len(previous['rows']) if previous else None, rows)
+        digest = references.checksum(rows, fetched['version'])
+        if previous and previous.get('checksum') == digest:
+            write_settings([('aa_status', {'checked': stamp, 'error': None, 'not_before': None, 'next_due': now + AA_INTERVAL})])
+            return
+        snapshot = {'rows': rows, 'checksum': digest, 'retrieved': stamp, 'changed': stamp,
+                    'index_version': fetched['version'], 'tier': fetched['tier']}
+        write_settings([('aa_snapshot', snapshot), ('aa_status', {'checked': stamp, 'error': None, 'not_before': None, 'next_due': now + AA_INTERVAL})])
+        aa_log.info('AA snapshot updated: %d rows', len(rows))
+    except references.RefreshError as err:
+        retry = err.retry_after
+        write_settings([('aa_status', {'checked': status.get('checked'), 'error': str(err),
+                                       'not_before': now + retry if retry else None,
+                                       'next_due': now + (retry or AA_INTERVAL)})])
+        aa_log.warning('AA refresh did not complete: %s', err)
+
+async def aa_loop(api_key: str) -> None:
+    # Due times are stored, so a restart does not spend quota on an early fetch.
+    while True:
+        status = read_setting('aa_status') or {}
+        wait = float(status.get('next_due') or 0) - time.time()
+        if wait > 0:
+            await asyncio.sleep(min(wait, 600))
+            continue
+        try:
+            await refresh_once(api_key)
+        except Exception as err:
+            aa_log.warning('AA refresh failed unexpectedly (%s)', type(err).__name__)
+            write_settings([('aa_status', {'checked': (read_setting('aa_status') or {}).get('checked'),
+                                           'error': 'The refresh failed unexpectedly. It will be retried later.',
+                                           'not_before': None, 'next_due': time.time() + AA_INTERVAL})])
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
     app.state.tasks = set()
+    if AA_KEY:
+        task = asyncio.create_task(aa_loop(AA_KEY)); app.state.tasks.add(task); task.add_done_callback(app.state.tasks.discard)
+    else:
+        # Removing the key also removes stored AA data, so a licence end can be met by restarting.
+        clear_reference_settings()
     yield
     for task in app.state.tasks: task.cancel()
 
@@ -353,6 +432,33 @@ async def run_events(run_id:str,request:Request):
             if data['state'] in ('completed','failed','cancelled','interrupted'): return
             yield ': keepalive\n\n'; await asyncio.sleep(1)
     return StreamingResponse(stream(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+def stamp_age(value: str) -> float:
+    return time.time() - datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()
+
+@app.get('/api/references')
+async def lab_references(model: list[str] = Query(default=[])):
+    """Stored Artificial Analysis data only. This route never calls AA and never returns the key."""
+    ids: list[str] = []
+    for value in model:
+        if not value or len(value) > 200 or value in ids: continue
+        ids.append(value)
+        if len(ids) == 8: break
+    status = read_setting('aa_status') or {}
+    snapshot = read_setting('aa_snapshot')
+    configured = bool(AA_KEY)
+    if not configured: state = 'not_configured'
+    elif snapshot is None: state = 'error' if status.get('error') else 'pending'
+    else: state = 'ready'
+    checked = status.get('checked')
+    stale = configured and (not checked or stamp_age(checked) > AA_STALE_SECONDS)
+    rows = snapshot['rows'] if snapshot else []
+    labs, missing = references.select_labs(rows) if snapshot else ([], [])
+    return {'configured': configured, 'state': state, 'checked': checked,
+            'changed': snapshot.get('changed') if snapshot else None, 'stale': stale,
+            'error': status.get('error'), 'index_version': snapshot.get('index_version') if snapshot else None,
+            'labs': labs, 'missing_labs': missing,
+            'matches': {model_id: references.match_local(model_id, rows) if snapshot else None for model_id in ids}}
 
 @app.get('/')
 async def root(): return FileResponse('/app/frontend/index.html')
