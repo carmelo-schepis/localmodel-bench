@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,20 @@ class StorageTests(unittest.TestCase):
             scored = [row for row in summary if row['total']]
             self.assertEqual({row['endpoint'] for row in scored}, {'lab-a', 'lab-b'})
             self.assertEqual([row['score'] for row in scored], [100, 100])
+
+
+class FrontendAssetTests(unittest.TestCase):
+    def test_every_local_asset_reference_exists(self):
+        frontend = Path(__file__).resolve().parent.parent / 'frontend'
+        references = re.findall(r'(?:href|src)="(/assets/[^"]+)"', (frontend / 'index.html').read_text())
+        self.assertGreaterEqual(len(references), 3)
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertTrue((frontend / reference.lstrip('/')).is_file())
+        stylesheet = (frontend / 'assets' / 'app.css').read_text()
+        for reference in re.findall(r'url\("([^"]+)"\)', stylesheet):
+            with self.subTest(reference=reference):
+                self.assertTrue((frontend / 'assets' / reference).is_file())
 
 
 if __name__ == '__main__':

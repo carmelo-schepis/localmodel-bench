@@ -133,7 +133,7 @@ Ollama tags are not reliable proof of an AA model match: quantization, fine-tune
 
 ## 9. UI and charts
 
-Use `DESIGN.md` as the visual authority, adapted to a utility application. Canvas `#010102`; surfaces `#0f1011`, `#141516`, `#18191a`; hairline `#23252a`; main text `#f7f8f8`; secondary text `#d0d6e0`/`#8a8f98`. Reserve lavender `#5e6ad2` for the brand, primary action, focus, and links. Use a system sans or locally bundled permitted Inter, weight 400 body/500–600 headings; mono for IDs and code. No proprietary fonts, CDN font requirement, gradients, neon, oversized marketing hero, or decorative dashboard clutter.
+Use `DESIGN.md` as the visual authority for colour, type and layout. No proprietary fonts, CDN font requirement, gradients, neon, or decorative dashboard clutter.
 
 Use 4px spacing increments, 8px control corners, 12px card corners, and restrained 24px panel padding. Check readable contrast: low-contrast design tokens are for disabled/decorative uses, not essential labels. Use neutral chart series with labels, marker shapes, line styles, and accessible tables; color alone never identifies a model. Keep errors understandable with icons and text.
 
