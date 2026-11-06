@@ -19,7 +19,7 @@ The app connects from inside Docker. `localhost` therefore means the app contain
 1. Add an Ollama OpenAI-compatible `/v1` base URL and discover models.
 2. Choose models and the Quick task set.
 3. Start a run and follow its persisted progress.
-4. Review per-task answers and category summaries.
+4. Review per-task answers on the attempt tape and compare category scores.
 
 Runs execute sequentially per configured endpoint. Requests stream responses and request reported usage where supported. Missing usage appears as unavailable. Run history is stored locally in SQLite.
 
@@ -37,6 +37,10 @@ Set `DATA_DIR` to a writable directory when running outside Docker. Run `python 
 ## Endpoint and privacy behavior
 
 Discovery uses `GET {base}/models`; inference uses streaming `POST {base}/chat/completions`. Model URLs are entered in the browser and requested by the server. The app does not forward prompts to Artificial Analysis. Keep the UI on a trusted local network. Endpoint URLs and responses are stored in your local database volume.
+
+## Bundled font
+
+The interface ships [Mona Sans](https://github.com/github/mona-sans) in `frontend/assets/fonts`, so it makes no external font requests. The font is licensed under the SIL Open Font License; see `frontend/assets/fonts/OFL.txt`.
 
 ## Methodology and limitations
 
