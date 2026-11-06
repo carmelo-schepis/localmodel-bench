@@ -42,6 +42,8 @@ const state = {
   runError: '',
   chart: 'score',
   chartWidth: 0,
+  references: null,
+  referencesError: '',
 };
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -210,7 +212,7 @@ function sheet() {
       <div class="category-grid">${CATEGORIES.map(name => `<label class="check"><input type="checkbox" data-key="category-${name}" data-category="${name}" ${state.categories.includes(name) ? 'checked' : ''}>${name}</label>`).join('')}</div>
       <p>Writing needs human review, and coding scores are provisional.</p>
     </div>
-    <p class="note">Early smoke-test release. Prompts repeat to exercise the workflow, so scores are provisional. Code is not run, essays are not auto-graded, and lab references are not wired up yet.</p>
+    <p class="note">Early smoke-test release. Prompts repeat to exercise the workflow, so scores are provisional. Code is not run, essays are not auto-graded. Published Artificial Analysis figures appear on Compare when the server has an AA key.</p>
     <div class="sheet-foot">
       <div class="tally"><span>${selectedModels() ? plural(selectedModels(), 'model') : 'No models chosen'}</span><span><b>${attempts.toLocaleString()}</b> attempts</span></div>
       ${state.startError ? `<p class="error" role="alert">${esc(state.startError)}</p>` : ''}
@@ -639,16 +641,20 @@ function chartsSection(run) {
   const families = familyCounts(scatterSet(records));
   const hasFamilies = [...families.values()].some(count => count >= 2);
   const current = state.chart === 'families' && !hasFamilies ? 'score' : state.chart;
-  const panel = localPanel(records, current);
+  const panel = isLabTab(current) ? labsPanel(records, current) : localPanel(records, current);
   const tabs = CHART_TABS.filter(tab => tab.id !== 'families' || hasFamilies)
     .map(tab => `<button type="button" class="chart-tab" data-chart="${tab.id}" data-key="chart-${tab.id}" aria-pressed="${current === tab.id}">${esc(tab.label)}</button>`)
     .join('');
   return `<section class="charts" aria-label="Charts">
-    <div class="block-head"><h2>Charts</h2><span>Scores and timings from this run only</span></div>
+    <div class="block-head"><h2>Charts</h2><span>${isLabTab(current) ? 'Published figures from Artificial Analysis beside this run' : 'Scores and timings from this run only'}</span></div>
     <div class="chart-groups">
       <div class="chart-group">
         <span class="chart-group-label" id="chart-group-run">This run</span>
         <div class="chart-tabs" role="group" aria-labelledby="chart-group-run">${tabs}</div>
+      </div>
+      <div class="chart-group">
+        <span class="chart-group-label" id="chart-group-labs">Against labs</span>
+        <div class="chart-tabs" role="group" aria-labelledby="chart-group-labs">${LAB_TABS.map(tab => `<button type="button" class="chart-tab" data-chart="${tab.id}" data-key="chart-${tab.id}" aria-pressed="${current === tab.id}">${esc(tab.label)}</button>`).join('')}</div>
       </div>
     </div>
     <p class="chart-desc">${esc(panel.desc)}</p>
@@ -657,6 +663,163 @@ function chartsSection(run) {
     ${panel.note ? `<div class="block-foot">${panel.note}</div>` : ''}
   </section>`;
 }
+
+/* Against labs. Published Artificial Analysis figures come from GET /api/references (stored data only). */
+const LAB_TABS = [
+  { id: 'lab-index', label: 'Published index' },
+  { id: 'lab-speed', label: 'Speed' },
+  { id: 'lab-index-speed', label: 'Index vs speed' },
+  { id: 'lab-index-cost', label: 'Index vs cost' },
+];
+const isLabTab = id => LAB_TABS.some(tab => tab.id === id);
+const LAB_FILLS = { OpenAI: '--lab-openai', Anthropic: '--lab-anthropic', xAI: '--lab-xai' };
+const LOCAL_FILL = '--chart-1';
+const LAB_DESC = {
+  'lab-index': "This is AA's published figure for a model with this name. AA did not test your setup, and your quantisation or settings may differ. Your Compare score is a different test and is not shown here.",
+  'lab-speed': 'Blue bars are measured here on short prompts. Lab-coloured bars are AA published speeds, which use much longer prompts. Treat this as a rough guide.',
+  'lab-index-speed': 'The index is published. Blue diamonds are your models matched to a published entry; their speed is measured here, on short prompts.',
+  'lab-index-cost': "Cost is AA's published cost per task, not the cost of running a model on your hardware.",
+};
+const AA_FOOT = [
+  { text: 'Source: Artificial Analysis (artificialanalysis.ai)', href: 'https://artificialanalysis.ai/' },
+  { text: 'Created by LocalModel Bench. Not endorsed by Artificial Analysis.' },
+];
+const labTicks = yMax => Array.from({ length: Math.round(yMax / (yMax > 60 ? 20 : 10)) + 1 }, (_, index) => index * (yMax > 60 ? 20 : 10));
+const labTop = values => (Math.floor(Math.max(...values) / 10) + 1) * 10;
+const labFirstPerLab = rows => rows.filter((row, index) => rows.findIndex(other => other.lab === row.lab) === index);
+
+function labsPanel(records, tab) {
+  const refs = state.references;
+  const width = state.chartWidth;
+  const labelMax = chartLabelMax();
+  const phone = innerWidth < 640;
+  const desc = LAB_DESC[tab];
+  if (!refs) {
+    return { desc, body: chartMessage(state.referencesError ? `Could not load published figures. ${state.referencesError}` : 'Loading published figures.'), legend: '', note: '' };
+  }
+  if (refs.state === 'not_configured') return { desc, body: chartMessage('Published figures are off. Add AA_API_KEY to .env and restart.'), legend: '', note: '' };
+  if (refs.state === 'pending') return { desc, body: chartMessage('Fetching published figures in the background.'), legend: '', note: '' };
+  if (refs.state === 'error') return { desc, body: chartMessage(refs.error || 'Published figures are unavailable.'), legend: '', note: '' };
+
+  const allLabs = refs.labs || [];
+  const labs = phone ? labFirstPerLab(allLabs) : allLabs;
+  const matched = records.map(record => ({ record, row: refs.matches?.[record.model] ?? null })).filter(entry => entry.row);
+  const unmatched = [...new Set(records.filter(record => !refs.matches?.[record.model]).map(record => record.model))];
+  const labLegend = [...new Set(labs.map(row => row.lab))].map(lab => ({ kind: 'swatch', fillVar: LAB_FILLS[lab] ?? '--chart-other', text: `${lab}, published` }));
+
+  const notes = [];
+  if (refs.checked) notes.push(`Checked ${when(refs.checked)}. Data last changed ${refs.changed ? when(refs.changed) : 'not yet'}. Intelligence Index v${refs.index_version ?? 'unknown'}.`);
+  if (refs.stale || refs.error) notes.push({ warn: true, text: `Data may be out of date. ${refs.checked ? `Last checked ${when(refs.checked)}.` : 'Never checked successfully.'}${refs.error ? ` Latest refresh: ${refs.error}` : ''}` });
+  if (state.referencesError) notes.push({ warn: true, text: `Could not refresh published figures (${state.referencesError}). Showing the last loaded data.` });
+  notes.push({ text: phone ? 'On small screens, only the top model from each lab is shown.' : 'Showing the top 3 models from each lab by Intelligence Index, keeping the best variant of each.' });
+  for (const lab of refs.missing_labs || []) notes.push({ text: `No models found for ${lab}.` });
+  const noteHTML = extra => [...notes, ...extra].map(item => (item.warn ? `<p class="chart-warn">${esc(item.text)}</p>` : `<p class="note">${esc(item.text)}</p>`)).join('');
+  const matchNote = () => {
+    if (!unmatched.length) return [];
+    const ids = unmatched.join(', ');
+    return [{ text: matched.length ? `Not matched to a published entry: ${ids}.` : `None of this run's models match a published entry: ${ids}.` }];
+  };
+
+  if (tab === 'lab-index') {
+    const items = sortItems([
+      ...matched.filter(({ row }) => row.intelligence_index !== null).map(({ record, row }) => ({
+        label: record.label, value: row.intelligence_index, valueText: row.intelligence_index.toFixed(1), fillVar: LOCAL_FILL, partial: false,
+        title: `${chartFullName(record)} matched to ${row.name}: ${row.intelligence_index.toFixed(1)} (published)`,
+      })),
+      ...labs.filter(row => row.intelligence_index !== null).map(row => ({
+        label: row.name, value: row.intelligence_index, valueText: row.intelligence_index.toFixed(1), fillVar: LAB_FILLS[row.lab] ?? '--chart-other', partial: false,
+        title: `${row.name} (${row.lab}): ${row.intelligence_index.toFixed(1)} (published)`,
+      })),
+    ], true);
+    if (!items.length) return { desc, body: chartMessage('No published index figures for these models yet.'), legend: '', note: noteHTML(matchNote()) };
+    return {
+      desc,
+      body: chartBarsSVG({ items, width, max: labTop(items.map(item => item.value)), labelMax, footer: AA_FOOT, ariaLabel: barAria('Published Intelligence Index', items, item => item.valueText) }),
+      legend: chartLegendHTML([...labLegend, { kind: 'swatch', fillVar: LOCAL_FILL, text: 'Your model, matched to a published entry' }]),
+      note: noteHTML(matchNote()),
+    };
+  }
+
+  if (tab === 'lab-speed') {
+    const items = sortItems([
+      ...records.filter(record => record.speed !== null).map(record => ({
+        label: record.label, value: record.speed, valueText: `${record.speed.toFixed(1)} tok/s`, fillVar: LOCAL_FILL, partial: false,
+        title: `${chartFullName(record)}: ${record.speed.toFixed(1)} tokens/s, measured here`,
+      })),
+      ...labs.filter(row => row.output_tps !== null).map(row => ({
+        label: row.name, value: row.output_tps, valueText: `${row.output_tps.toFixed(1)} tok/s`, fillVar: LAB_FILLS[row.lab] ?? '--chart-other', partial: false,
+        title: `${row.name} (${row.lab}): ${row.output_tps.toFixed(1)} tokens/s, published`,
+      })),
+    ], true);
+    if (!items.length) return { desc, body: chartMessage('No speed figures to show for these models.'), legend: '', note: noteHTML([]) };
+    return {
+      desc,
+      body: chartBarsSVG({ items, width, max: chartNiceCeil(Math.max(...items.map(item => item.value))), labelMax, footer: AA_FOOT, ariaLabel: barAria('Output speed, measured and published', items, item => item.valueText) }),
+      legend: chartLegendHTML([...labLegend, { kind: 'swatch', fillVar: LOCAL_FILL, text: 'Measured here' }]),
+      note: noteHTML([]),
+    };
+  }
+
+  // Index vs speed and Index vs cost: both plot the published index on y and a published or measured x.
+  const costTab = tab === 'lab-index-cost';
+  const points = [
+    ...matched.filter(({ record, row }) => row.intelligence_index !== null && (costTab ? row.cost_per_task !== null : record.speed !== null)).map(({ record, row }) => ({
+      x: costTab ? row.cost_per_task : record.speed, y: row.intelligence_index, shape: 'diamond', fillVar: LOCAL_FILL, partial: false,
+      label: record.label,
+      title: `${chartFullName(record)} matched to ${row.name}: index ${row.intelligence_index.toFixed(1)} (published)`,
+    })),
+    ...labs.filter(row => row.intelligence_index !== null && (costTab ? row.cost_per_task !== null : row.output_tps !== null)).map(row => ({
+      x: costTab ? row.cost_per_task : row.output_tps, y: row.intelligence_index, shape: 'diamond', fillVar: LAB_FILLS[row.lab] ?? '--chart-other', partial: false,
+      label: row.name,
+      title: `${row.name} (${row.lab}): index ${row.intelligence_index.toFixed(1)} (published)`,
+    })),
+  ];
+  if (!points.length) {
+    return { desc, body: chartMessage(costTab ? 'No cost per task is published for these models.' : 'Needs a published index and a speed for at least one model.'), legend: '', note: noteHTML(matchNote()) };
+  }
+  const yMax = labTop(points.map(point => point.y));
+  const legend = [...labLegend.map(item => ({ ...item, kind: 'diamond' })), { kind: 'diamond', fillVar: LOCAL_FILL, text: 'Your model, matched' }, { kind: 'best', text: 'Best quadrant' }];
+  if (costTab) legend.push({ kind: 'dotted', text: 'Pareto line (published figures only)' });
+  return {
+    desc,
+    body: chartScatterSVG({
+      points,
+      width,
+      height: chartHeight(width),
+      xTitle: costTab ? 'Cost per task (log scale, as published)' : 'Output speed (tokens/s, log scale)',
+      yTitle: 'Intelligence Index',
+      yMax,
+      yTicks: labTicks(yMax),
+      xFormat: value => (costTab ? `$${Number(value.toPrecision(2))}` : `${Number(value.toPrecision(2))}`),
+      bestSide: costTab ? 'left' : 'right',
+      pareto: costTab,
+      footer: AA_FOOT,
+      labelMax,
+      ariaLabel: `${costTab ? 'Published index against cost per task' : 'Published index against output speed'}, ${points.length} models plotted`,
+    }),
+    legend: chartLegendHTML(legend),
+    note: noteHTML(matchNote()),
+  };
+}
+
+async function loadReferences() {
+  const run = state.active;
+  const models = run ? [...new Set(run.models.map(model => model.model))] : [];
+  const current = ++referenceRequest;
+  const params = new URLSearchParams();
+  models.slice(0, 8).forEach(id => params.append('model', id));
+  try {
+    const data = await api('/references?' + params.toString());
+    if (current !== referenceRequest) return;
+    state.references = data;
+    state.referencesError = '';
+  } catch (error) {
+    if (current !== referenceRequest) return;
+    state.referencesError = error.message;
+  }
+  if (route().view === 'compare') render();
+}
+let referenceRequest = 0;
 
 /* Data */
 async function loadRuns() {
@@ -730,6 +893,7 @@ async function syncRoute() {
   if (view === 'compare' && state.active && !TERMINAL.has(state.active.state)) watchRun(state.active.id);
   else stopWatching();
   render();
+  if (view === 'compare') loadReferences();
 }
 
 async function openForCompare(id) {
@@ -829,6 +993,7 @@ document.addEventListener('change', async event => {
     await openForCompare(target.value);
     if (state.active && !TERMINAL.has(state.active.state)) watchRun(state.active.id);
     render();
+    loadReferences();
   }
 });
 
@@ -858,6 +1023,7 @@ addEventListener('hashchange', syncRoute);
 (async () => {
   checkHealth();
   setInterval(checkHealth, 30000);
+  setInterval(() => { if (route().view === 'compare') loadReferences(); }, 5 * 60 * 1000);
   state.chartWidth = chartWidthNow();
   let chartFrame = 0;
   new ResizeObserver(() => {

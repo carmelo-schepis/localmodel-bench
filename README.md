@@ -2,7 +2,7 @@
 
 A small, self-hosted interface for testing chat models exposed through Ollama's OpenAI-compatible `/v1` endpoint. No model weights or GPU are required in this container.
 
-> **Early release:** the bundled task pack is a smoke-test fixture. Its code prompts are not run in a sandbox, writing requires human review, no validated Artificial Analysis integration or statistical confidence intervals are included, and local run scores are not a validated intelligence index. Do not use these results to select safety-critical models.
+> **Early release:** the bundled task pack is a smoke-test fixture. Its code prompts are not run in a sandbox, writing requires human review, Artificial Analysis figures are unvalidated published reference data, no statistical confidence intervals are included, and local run scores are not a validated intelligence index. Do not use these results to select safety-critical models.
 
 ## Start
 
@@ -23,7 +23,7 @@ The app connects from inside Docker. `localhost` therefore means the app contain
 
 Runs execute sequentially per configured endpoint. Requests stream responses and request reported usage where supported. Missing usage appears as unavailable. Run history is stored locally in SQLite.
 
-The first-release question set deliberately repeats a small smoke-test pool to exercise grading and the UI. Selecting Standard or Rigorous repeats the same tiny pool; those labels indicate request count, not a validated, representative benchmark. Results include no confidence intervals. The hand-built coding responses are checked as text and are not executed; coding scores must not be interpreted as verified executable correctness. Essay results are left ungraded for human review. Endpoint-derived cost, wattage, hardware details, and direct head-to-head Artificial Analysis results are unavailable.
+The first-release question set deliberately repeats a small smoke-test pool to exercise grading and the UI. Selecting Standard or Rigorous repeats the same tiny pool; those labels indicate request count, not a validated, representative benchmark. Results include no confidence intervals. The hand-built coding responses are checked as text and are not executed; coding scores must not be interpreted as verified executable correctness. Essay results are left ungraded for human review. Endpoint-derived cost, wattage and hardware details are unavailable. Published Artificial Analysis figures appear beside local results and are never mixed into them.
 
 ## Development
 
@@ -39,6 +39,22 @@ Set `DATA_DIR` to a writable directory when running outside Docker. Run `python 
 Discovery uses `GET {base}/models`; inference uses streaming `POST {base}/chat/completions`. Model URLs are entered in the browser and requested by the server. The app does not forward prompts to Artificial Analysis. Keep the UI on a trusted local network. Endpoint URLs and responses are stored in your local database volume.
 
 Discovery checks Ollama's `/api/show` capabilities and excludes models without completion support, including embedding-only models. Run creation repeats this check so stale selections cannot submit those models. If a compatible server does not expose this metadata (404/405 or no capabilities field), its listed models remain available; inference errors include the server's error message when provided.
+
+## Artificial Analysis figures
+
+Optional. Set a key in `.env`, then restart:
+
+```sh
+AA_API_KEY=your-key-here
+AA_REFRESH_MINUTES=180   # optional, 60 to 1440
+```
+
+- **Key handling:** the key stays on the server. The browser never calls Artificial Analysis and never sees the key.
+- **What is sent:** only `GET https://artificialanalysis.ai/api/v2/language/models/free` with the key header and a page number. No prompts, answers, model names or endpoint URLs are sent.
+- **Refresh and quota:** the server refreshes in the background every `AA_REFRESH_MINUTES`. The free tier allows 100 requests per 24 hours across all keys in the account, and a full refresh uses about one request per 200 models. Restarts do not fetch early. A failed or partial refresh keeps the last complete snapshot.
+- **Meaning:** figures are AA's published results for models with the same name. AA did not test your setup, and this project does not validate them.
+- **Attribution and licence:** charts that show these figures are labelled with the source. The Artificial Analysis logo is not bundled. AA's Terms of Use and Data Platform Terms govern this data. They limit redistribution, require attribution, and restrict using the data for competing benchmarking products. You are responsible for following them, including whether you may run this app for anyone other than yourself.
+- **Deleting stored data:** remove `AA_API_KEY` from `.env` and restart. The stored AA data is deleted at startup.
 
 ## Bundled font
 

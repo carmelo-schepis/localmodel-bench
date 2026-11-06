@@ -60,6 +60,7 @@ Compare shows one chart at a time, chosen by a tab row, above the score matrix a
 - **Scales.** Score is always 0–100 and never truncated. Time and speed start at zero. Scatter x axes are logarithmic and labelled.
 - **Frontier.** The dotted Pareto line describes this run only. Do not present it as a general frontier.
 - **Labels.** Every mark has a text label and an SVG `<title>`. Colour never carries meaning alone.
+- **Against labs.** Published Artificial Analysis figures use the lab tokens `--lab-openai`, `--lab-anthropic` and `--lab-xai`. Each labs chart carries its source line and the non-endorsement line inside the SVG. Published values and local values share an axis only when a model name matches, and the chart says so.
 
 ## Writing
 
