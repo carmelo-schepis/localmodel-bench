@@ -93,6 +93,32 @@ class GradingTests(unittest.TestCase):
                 main.Endpoint.validate_url(url)
 
 
+class RunSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_accepts_more_than_eight_models(self):
+        ids = [f'model-{i}' for i in range(12)]
+        payload = main.RunRequest(endpoints=[{
+            'name': 'Ollama', 'url': 'http://ollama:11434/v1', 'models': ids,
+        }])
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            main.app.state.tasks = set()
+            with patch.object(main, 'models_for', AsyncMock(return_value=[{'id': model_id, 'owned_by': 'x'} for model_id in ids])), \
+                 patch.object(main, 'execute_run', AsyncMock()):
+                result = await main.create_run(payload, None)
+            with main.connect_db() as db:
+                config = json.loads(db.execute('SELECT config FROM runs WHERE id=?', (result['id'],)).fetchone()['config'])
+        self.assertEqual(result['state'], 'queued')
+        self.assertEqual(len(config['models']), 12)
+
+    def test_run_reports_its_selected_categories(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            config = {'models': [{'endpoint': 'one', 'model': 'm'}], 'endpoints': [], 'categories': ['Coding', 'Logic']}
+            with main.connect_db() as db:
+                db.execute("INSERT INTO runs(id,created,depth,state,config) VALUES(?,?,?,?,?)", ('selected', 'today', 'Quick', 'running', json.dumps(config)))
+            self.assertEqual(main.serialize_run('selected')['categories'], ['Coding', 'Logic'])
+
+
 class StorageTests(unittest.TestCase):
     def test_partial_run_never_gets_composite(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):

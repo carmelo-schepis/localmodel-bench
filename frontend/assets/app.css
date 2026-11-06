@@ -154,6 +154,9 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   border-bottom: 2px solid var(--black);
   transform: rotate(-45deg);
 }
+.check input:disabled { border-color: var(--line-2); cursor: not-allowed; }
+.check.is-duplicate { cursor: not-allowed; }
+.check.is-duplicate code { color: var(--ink-3); }
 
 .error { margin-top: 12px; color: var(--signal); }
 .spin {
