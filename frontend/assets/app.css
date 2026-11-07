@@ -365,12 +365,26 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 
 .part-detail .block-head { padding-top: 40px; }
 .detail td { font-size: 14px; }
+.detail-filters { display: flex; flex-wrap: wrap; gap: 8px 32px; padding: 4px var(--gutter) 4px; }
+.detail-filters .field { width: min(280px, 100%); }
+.detail-filters .field select { font-size: 15px; }
 .detail td:first-child { padding-left: 0; }
 .detail tbody th { vertical-align: top; color: var(--ink); font-size: 15px; font-weight: 400; white-space: normal; }
 .detail tbody th small { display: block; color: var(--ink-3); font-size: 12px; }
 .detail tbody th code { font-size: 13px; overflow-wrap: anywhere; }
 
 /* Charts (Compare) */
+.saved-bench { border-top: 1px solid var(--line); margin-top: 32px; }
+.saved-bench .block-head { padding-top: 28px; }
+
+/* Datasets */
+.datasets-list { padding-bottom: 32px; }
+.datasets-list .dataset { border-top: 1px solid var(--line); }
+.datasets-list .dataset:first-child { border-top: 0; }
+.datasets-list .block-head h2 { font-size: 17px; }
+.datasets-list .block-head h2 a { text-decoration: none; }
+.datasets-list .block-head h2 a:hover { text-decoration: underline; }
+
 .charts .block-head { padding-bottom: 16px; }
 .chart-groups { display: flex; flex-wrap: wrap; gap: 16px 32px; padding: 0 var(--gutter); }
 .chart-group-label { display: block; margin-bottom: 8px; color: var(--ink-3); font-size: 13px; }

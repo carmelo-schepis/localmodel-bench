@@ -20,8 +20,11 @@ The app connects from inside Docker. `localhost` therefore means the app contain
 2. Choose models and the Quick task set.
 3. Start a run and follow its persisted progress.
 4. Review per-task answers on the attempt tape and compare category scores.
+5. Return later: finished runs keep a dataset each, and the saved bench keeps every model's latest scores.
 
 Runs execute sequentially per configured endpoint. Requests stream responses and request reported usage where supported. Missing usage appears as unavailable. Run history is stored locally in SQLite.
+
+Bench setup is also stored locally: endpoints, their model ticks, depth and categories survive a reload, so the model list never resets. Reconnecting an endpoint that is already listed overwrites its entry instead of duplicating it. Every run keeps a copy of its data, browsable per model and category on the Datasets tab. The saved bench at the bottom of Compare keeps the latest data per model across runs; a model benched again overwrites its own entry, and a run that produced no graded answers never overwrites the bench.
 
 The first-release question set deliberately repeats a small smoke-test pool to exercise grading and the UI. Selecting Standard or Rigorous repeats the same tiny pool; those labels indicate request count, not a validated, representative benchmark. Results include no confidence intervals. The hand-built coding responses are checked as text and are not executed; coding scores must not be interpreted as verified executable correctness. Essay results are left ungraded for human review. Endpoint-derived cost, wattage and hardware details are unavailable. Published Artificial Analysis figures appear beside local results and are never mixed into them.
 

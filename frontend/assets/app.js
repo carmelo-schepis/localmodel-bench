@@ -44,13 +44,19 @@ const state = {
   chartWidth: 0,
   references: null,
   referencesError: '',
+  bench: null,
+  benchError: '',
+  datasets: [],
+  datasetsError: '',
+  detailModel: '',
+  detailCategory: '',
 };
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function route() {
   const [view, id] = location.hash.slice(1).split('/');
-  return ['bench', 'runs', 'compare', 'run'].includes(view) && (view !== 'run' || id) ? { view, id } : { view: 'bench' };
+  return ['bench', 'runs', 'datasets', 'compare', 'run'].includes(view) && (view !== 'run' || id) ? { view, id } : { view: 'bench' };
 }
 
 async function api(path, options = {}) {
@@ -103,6 +109,7 @@ function render() {
     if (current) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
   if (view === 'runs') paint('runs', runsView());
+  else if (view === 'datasets') paint('datasets', datasetsView());
   else if (view === 'compare') paint('compare', compareView());
   else if (view === 'run') paint('run:' + id, runView(id));
   else paint('bench', benchView());
@@ -357,12 +364,16 @@ function inspector(run) {
 }
 
 /* Scores */
+/* Errors come from per-attempt results, or a server-side count map for saved
+   copies (Datasets and the saved bench) that do not carry raw attempts. */
 function errorCounts(run) {
-  const counts = new Map();
-  for (const result of run.results) {
-    if (result.status !== 'error') continue;
-    const key = `${result.endpoint}/${result.model}/${result.category}`;
-    counts.set(key, (counts.get(key) || 0) + 1);
+  const counts = new Map(Object.entries(run.errors || {}));
+  if (Array.isArray(run.results)) {
+    for (const result of run.results) {
+      if (result.status !== 'error') continue;
+      const key = `${result.endpoint}/${result.model}/${result.category}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
   }
   return row => counts.get(`${row.endpoint}/${row.model}/${row.category}`) || 0;
 }
@@ -409,10 +420,14 @@ function compareView() {
   const head = `<header class="page-head"><div><h1>Compare</h1><p class="lead">Every model in one run, scored on the same tasks.</p></div>${picker}</header>`;
   const failure = state.runsError ? `<div class="empty"><p class="error" role="alert">${esc(state.runsError)}</p></div>` : '';
   if (!run) {
-    return { head, charts: '', matrix: failure || '<div class="empty"><p>No runs to compare yet. Start a benchmark with two or more models.</p><a class="button" href="#bench">Set up a benchmark</a></div>', detail: '' };
+    return { head, charts: '', matrix: failure || '<div class="empty"><p>No runs to compare yet. Start a benchmark with two or more models.</p><a class="button" href="#bench">Set up a benchmark</a></div>', detail: '', bench: savedBench() };
   }
-  const rows = run.models.map(model => {
-    const lines = run.summary.filter(row => row.total && sameModel(row, model));
+  const modelFilter = state.detailModel;
+  const categoryFilter = state.detailCategory;
+  const categoryNames = Array.isArray(run.categories) && run.categories.length ? run.categories : CATEGORIES;
+  const rows = run.models.map((model, index) => {
+    if (modelFilter !== '' && String(index) !== modelFilter) return '';
+    const lines = run.summary.filter(row => row.total && sameModel(row, model) && (!categoryFilter || row.category === categoryFilter));
     return lines.map((row, index) => `<tr>
       ${index ? '' : `<th scope="rowgroup" rowspan="${lines.length}">${modelCell(model)}</th>`}
       <td>${esc(row.category)}</td>
@@ -422,6 +437,16 @@ function compareView() {
       <td class="num">${row.tokens ? row.tokens.toLocaleString() : 'Unavailable'}</td>
     </tr>`).join('');
   }).join('');
+  const filters = rows ? `<div class="detail-filters">
+      <label class="field">Model<select id="detail-model" data-key="detail-model">
+        <option value="">All models</option>
+        ${run.models.map((model, index) => `<option value="${index}" ${String(index) === modelFilter ? 'selected' : ''}>${esc(model.endpoint)} · ${esc(model.model)}</option>`).join('')}
+      </select></label>
+      <label class="field">Category<select id="detail-category" data-key="detail-category">
+        <option value="">All categories</option>
+        ${categoryNames.map(name => `<option value="${esc(name)}" ${name === categoryFilter ? 'selected' : ''}>${esc(name)}</option>`).join('')}
+      </select></label>
+    </div>` : '';
   return {
     head,
     charts: chartsSection(run),
@@ -432,12 +457,69 @@ function compareView() {
     </section>`,
     detail: rows ? `<section aria-label="Timing and tokens">
       <div class="block-head"><h2>Timing and tokens</h2></div>
+      ${filters}
       <div class="table-wrap" tabindex="0" role="region" aria-label="Timing and tokens by model and category"><table class="detail">
         <thead><tr><th>Model</th><th>Category</th><th class="num">Matches</th><th class="num">Graded</th><th class="num">Time</th><th class="num">Tokens</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
     </section>` : '',
+    bench: savedBench(),
   };
+}
+
+/* The saved bench: latest data per model, kept on the server. A run that
+   benches a model again overwrites its entry here; run copies stay untouched. */
+function benchRun() {
+  const pages = state.bench?.models || [];
+  if (!pages.length) return null;
+  const models = pages.map(item => ({ endpoint: item.endpoint, model: item.model }));
+  const summary = pages.flatMap(item => item.summary.map(row => ({ ...row, endpoint: item.endpoint, model: item.model })));
+  const errors = pages.reduce((all, item) => Object.assign(all, item.errors || {}), {});
+  const composites = {};
+  for (const item of pages) if (item.composite !== null && item.composite !== undefined) composites[`${item.endpoint}/${item.model}`] = item.composite;
+  return { state: 'completed', models, categories: CATEGORIES, summary, composites, complete: true, errors, results: null };
+}
+
+function savedBench() {
+  const run = state.bench === null ? null : benchRun();
+  let body;
+  if (!state.bench) body = `<p class="empty">${state.benchError ? `Could not load the saved bench. ${esc(state.benchError)}` : 'Loading the saved bench.'}</p>`;
+  else if (!run) body = '<p class="empty">No models benched yet. Completed runs keep their data here so models do not reset between runs.</p>';
+  else body = scoreTable(run);
+  return `<section class="saved-bench" aria-label="Saved bench">
+    <div class="block-head"><h2>Saved bench</h2><span>Latest data per model, kept on the server</span></div>
+    ${body}
+    <div class="block-foot"><p class="note">One entry per model with its latest benched data, so a repeated model overwrites its entry instead of duplicating it. Every run keeps its own copy in <a class="text-link" href="#datasets">Datasets</a>. ${SMOKE_NOTE}</p></div>
+  </section>`;
+}
+
+/* Datasets */
+function datasetRun(dataset) {
+  return { id: dataset.id, state: dataset.state, models: dataset.models, categories: dataset.categories,
+    summary: dataset.summary, composites: dataset.composites, complete: dataset.complete,
+    errors: dataset.errors || {}, results: null };
+}
+
+function datasetSection(dataset) {
+  const live = !TERMINAL.has(dataset.state);
+  const stateClass = live ? 'is-live' : dataset.state === 'failed' || dataset.state === 'cancelled' || dataset.state === 'interrupted' ? 'is-failed' : '';
+  return `<section class="dataset" aria-label="Dataset ${esc(when(dataset.created))}">
+    <div class="block-head">
+      <h2><a class="text-link" href="#run/${esc(dataset.id)}">${esc(when(dataset.created))}</a></h2>
+      <span><span class="run-state ${stateClass}">${esc(dataset.state)}</span> · ${esc(dataset.depth)} · ${plural(dataset.models.length, 'model')}</span>
+    </div>
+    ${scoreTable(datasetRun(dataset))}
+    ${dataset.error ? `<div class="block-foot"><p class="error">${esc(dataset.error)}</p></div>` : ''}
+  </section>`;
+}
+
+function datasetsView() {
+  const head = `<header class="page-head"><div><h1>Datasets</h1><p class="lead">A saved copy of the data from each run.</p></div><a class="button" href="#bench">New benchmark</a></header>`;
+  let list;
+  if (state.datasetsError) list = `<div class="empty"><p class="error" role="alert">${esc(state.datasetsError)}</p></div>`;
+  else if (!state.datasets.length) list = '<div class="empty"><p>No datasets yet. Each run keeps a copy of its data here.</p><a class="button" href="#bench">Set up a benchmark</a></div>';
+  else list = `<div class="datasets-list">${state.datasets.map(datasetSection).join('')}</div>`;
+  return { head, list };
 }
 
 /* Charts (Compare). Data derivation lives here; SVG builders are in charts.js. */
@@ -840,6 +922,59 @@ async function loadReferences() {
 }
 let referenceRequest = 0;
 
+/* Saved bench and per-run dataset copies. */
+let benchRequest = 0;
+
+async function loadBench() {
+  const current = ++benchRequest;
+  try {
+    const data = await api('/bench');
+    if (current !== benchRequest) return;
+    state.bench = data;
+    state.benchError = '';
+  } catch (error) {
+    if (current !== benchRequest) return;
+    state.benchError = error.message;
+  }
+  if (route().view === 'compare') render();
+}
+
+async function loadDatasets() {
+  try {
+    state.datasets = await api('/datasets');
+    state.datasetsError = '';
+  } catch (error) {
+    state.datasetsError = error.message;
+  }
+}
+
+/* Bench setup: endpoints, ticks, depth and categories survive a reload. */
+async function loadSetup() {
+  try {
+    const setup = await api('/bench/setup');
+    if (setup && Array.isArray(setup.endpoints)) {
+      state.endpoints = setup.endpoints
+        .filter(item => item && typeof item.name === 'string' && typeof item.url === 'string')
+        .map(item => ({
+          name: item.name,
+          url: item.url,
+          models: Array.isArray(item.models) ? item.models.filter(id => typeof id === 'string') : [],
+          found: Array.isArray(item.found)
+            ? item.found.filter(model => model && typeof model.id === 'string').map(model => ({ id: model.id, owned_by: model.owned_by || '' }))
+            : [],
+        }));
+    }
+    if (setup && DEPTHS[setup.depth]) state.depth = setup.depth;
+    if (setup && Array.isArray(setup.categories)) state.categories = setup.categories.filter(name => CATEGORIES.includes(name));
+  } catch { /* keep the defaults */ }
+}
+
+async function saveSetup() {
+  try {
+    await api('/bench/setup', { method: 'PUT', body: JSON.stringify({ endpoints: state.endpoints, depth: state.depth, categories: state.categories }) });
+  } catch { /* the next change retries the save */ }
+}
+
 /* Data */
 async function loadRuns() {
   try {
@@ -874,6 +1009,7 @@ function watchRun(id) {
       if (TERMINAL.has(run.state)) {
         stopWatching();
         await loadRuns();
+        if (route().view === 'compare') loadBench();
       }
     } catch (error) {
       if (watcher !== current) return;
@@ -903,6 +1039,13 @@ async function syncRoute() {
     watchRun(id);
     return;
   }
+  if (view === 'datasets') {
+    await loadDatasets();
+    if (current !== navigation) return;
+    stopWatching();
+    render();
+    return;
+  }
   if (view === 'compare' || view === 'runs') {
     await loadRuns();
     if (current !== navigation) return;
@@ -912,13 +1055,15 @@ async function syncRoute() {
   if (view === 'compare' && state.active && !TERMINAL.has(state.active.state)) watchRun(state.active.id);
   else stopWatching();
   render();
-  if (view === 'compare') loadReferences();
+  if (view === 'compare') { loadReferences(); loadBench(); }
 }
 
 async function openForCompare(id) {
   try {
     state.active = await api('/runs/' + id);
     state.attempt = null;
+    state.detailModel = '';
+    state.detailCategory = '';
     state.runsError = '';
   } catch (error) {
     state.runsError = error.message;
@@ -941,10 +1086,10 @@ async function checkHealth() {
 document.addEventListener('click', async event => {
   const target = event.target;
   const depth = target.closest('[data-depth]');
-  if (depth) { state.depth = depth.dataset.depth; render(); return; }
+  if (depth) { state.depth = depth.dataset.depth; render(); saveSetup(); return; }
 
   const remove = target.closest('.remove');
-  if (remove) { state.endpoints.splice(Number(remove.dataset.i), 1); render(); return; }
+  if (remove) { state.endpoints.splice(Number(remove.dataset.i), 1); render(); saveSetup(); return; }
 
   const chartTab = target.closest('[data-chart]');
   if (chartTab) { state.chart = chartTab.dataset.chart; render(); return; }
@@ -1006,8 +1151,16 @@ document.addEventListener('change', async event => {
     if (target.checked && selectedDevice(index, target.value)) { render(); return; }
     endpoint.models = target.checked ? [...new Set([...endpoint.models, target.value])] : endpoint.models.filter(id => id !== target.value);
     render();
+    saveSetup();
   } else if (target.dataset.category) {
     state.categories = target.checked ? CATEGORIES.filter(name => state.categories.includes(name) || name === target.dataset.category) : state.categories.filter(name => name !== target.dataset.category);
+    render();
+    saveSetup();
+  } else if (target.id === 'detail-model') {
+    state.detailModel = target.value;
+    render();
+  } else if (target.id === 'detail-category') {
+    state.detailCategory = target.value;
     render();
   } else if (target.id === 'compare-run') {
     stopWatching();
@@ -1027,13 +1180,20 @@ document.addEventListener('submit', async event => {
   render();
   try {
     const result = await api('/models', { method: 'POST', body: JSON.stringify({ name: data.get('name'), url: data.get('url') }) });
+    // Reconnecting the same endpoint overwrites its entry instead of duplicating it.
     const existing = state.endpoints.findIndex(item => item.url === result.url);
+    const previous = existing !== -1 ? state.endpoints[existing] : null;
     if (existing !== -1) state.endpoints.splice(existing, 1);
     // Untick any model another device already lists, so each model is tested once.
     const detectedElsewhere = new Set(state.endpoints.flatMap(item => item.found.map(model => model.id)));
-    const models = result.models.map(model => model.id).filter(id => !detectedElsewhere.has(id));
+    const knownPreviously = id => previous && previous.found.some(item => item.id === id);
+    // Models known before keep their earlier tick; newly discovered models tick on.
+    const models = result.models.map(model => model.id)
+      .filter(id => !detectedElsewhere.has(id))
+      .filter(id => !knownPreviously(id) || previous.models.includes(id));
     state.endpoints.push({ name: result.name, url: result.url, models, found: result.models });
     state.draft = { name: null, url: '' };
+    saveSetup();
   } catch (error) {
     state.connectError = error.message;
   } finally {
@@ -1061,10 +1221,19 @@ addEventListener('hashchange', syncRoute);
     });
   }).observe(app);
   setInterval(async () => {
-    if (route().view !== 'runs' || !state.runs.some(run => !TERMINAL.has(run.state))) return;
-    await loadRuns();
-    if (route().view === 'runs') render();
+    const view = route().view;
+    const live = list => list.some(item => !TERMINAL.has(item.state));
+    if (view === 'runs') {
+      if (!live(state.runs)) return;
+      await loadRuns();
+      if (route().view === 'runs') render();
+    } else if (view === 'datasets') {
+      if (!live(state.datasets)) return;
+      await loadDatasets();
+      if (route().view === 'datasets') render();
+    }
   }, 2500);
+  await loadSetup();
   await loadRuns();
   const running = state.runs.find(run => !TERMINAL.has(run.state));
   if (running && route().view === 'bench' && !location.hash) {

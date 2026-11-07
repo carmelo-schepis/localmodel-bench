@@ -64,8 +64,16 @@ def initialize() -> None:
           FOREIGN KEY(run_id) REFERENCES runs(id));
         CREATE INDEX IF NOT EXISTS results_run ON results(run_id);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS bench_models (endpoint TEXT NOT NULL, model TEXT NOT NULL, updated TEXT NOT NULL,
+          run_id TEXT NOT NULL, run_created TEXT NOT NULL, run_depth TEXT NOT NULL, data TEXT NOT NULL,
+          PRIMARY KEY (endpoint, model));
         """)
         db.execute("UPDATE runs SET state='interrupted' WHERE state IN ('queued','running')")
+        completed = [row['id'] for row in db.execute("SELECT id FROM runs WHERE state='completed' ORDER BY created ASC")]
+    # Runs completed before this table existed keep feeding the saved bench,
+    # so a restart never loses benched models.
+    for run_id in completed:
+        publish_to_bench(run_id)
 
 class Endpoint(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -100,6 +108,47 @@ class ConnectRequest(BaseModel):
     @classmethod
     def check_url(cls, value: str) -> str:
         return Endpoint.validate_url(value)
+
+class FoundModel(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    owned_by: str = Field(default='', max_length=200)
+
+class SetupEndpoint(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=8, max_length=500)
+    models: list[str] = Field(default_factory=list, max_length=500)
+    found: list[FoundModel] = Field(default_factory=list, max_length=500)
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return Endpoint.validate_url(value)
+
+    @field_validator('models')
+    @classmethod
+    def check_models(cls, value: list[str]) -> list[str]:
+        if any(not model or len(model) > 200 for model in value):
+            raise ValueError('Model IDs must be 1 to 200 characters.')
+        return list(dict.fromkeys(value))
+
+class BenchSetup(BaseModel):
+    endpoints: list[SetupEndpoint] = Field(default_factory=list, max_length=24)
+    depth: str = 'Quick'
+    categories: list[str] = Field(default_factory=lambda: list(CATEGORIES))
+
+    @field_validator('depth')
+    @classmethod
+    def check_depth(cls, value: str) -> str:
+        if value not in DEPTHS:
+            raise ValueError('Choose Quick, Standard, or Rigorous.')
+        return value
+
+    @field_validator('categories')
+    @classmethod
+    def check_categories(cls, value: list[str]) -> list[str]:
+        if not value or any(category not in CATEGORIES for category in value):
+            raise ValueError('Select at least one supported category.')
+        return list(dict.fromkeys(value))
 
 def safe_error(err: Exception) -> str:
     if isinstance(err, httpx.HTTPStatusError):
@@ -161,40 +210,111 @@ def grade(category: str, text: str, answer: str, mode: str) -> tuple[float | Non
         score = 1.0 if normalized(candidate.strip(' .!`"')) == normalized(answer) else 0.0
     return score, None
 
-def serialize_run(run_id: str) -> dict[str, Any]:
-    with connect_db() as db:
-        run = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-        if not run:
-            raise HTTPException(404, 'Run not found.')
-        rows = [dict(r) for r in db.execute('SELECT * FROM results WHERE run_id=? ORDER BY rowid', (run_id,))]
-    data = json.loads(run['data'])
-    summaries = []
+def rollup_results(config: dict, run_state: str, progress: int, total: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-model, per-category rollup shared by the run view, Datasets and the saved bench."""
+    models = config['models']
+    summary = []
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault((row['endpoint'], row['model']), []).append(row)
-    for model, items in grouped.items():
-        endpoint, model_id = model
+    # Config order first, then any endpoint/model pair that appears only in the rows.
+    entries = [(model['endpoint'], model['model']) for model in models]
+    for key in grouped:
+        if key not in entries: entries.append(key)
+    for endpoint, model_id in entries:
+        items = grouped.get((endpoint, model_id), [])
         for category in CATEGORIES:
             relevant = [r for r in items if r['category'] == category]
             graded = [r for r in relevant if r['score'] is not None]
-            summaries.append({'endpoint': endpoint, 'model': model_id, 'category': category,
+            summary.append({'endpoint': endpoint, 'model': model_id, 'category': category,
                 'score': round(sum(r['score'] for r in graded) / len(graded) * 100, 1) if graded else None,
                 'coverage': len(graded), 'total': len(relevant),
                 'elapsed': round(sum(r['elapsed'] or 0 for r in relevant), 2),
                 'tokens': sum(r['tokens'] or 0 for r in relevant),
                 'ungraded': sum(1 for r in relevant if r['score'] is None)})
-    config = json.loads(run['config'])
-    complete = run['state'] == 'completed' and run['progress'] == run['total'] and all(
-        sum(1 for x in summaries if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing' and x['coverage'] == x['total'] and x['total']) == 6
-        for e in config['models'])
+    complete = run_state == 'completed' and progress == total and all(
+        sum(1 for x in summary if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing' and x['coverage'] == x['total'] and x['total']) == 6
+        for e in models)
     composites = {}
     if complete:
-        for e in config['models']:
-            composites[e['endpoint'] + '/' + e['model']] = round(sum(x['score'] for x in summaries if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing') / 6, 1)
+        for e in models:
+            composites[e['endpoint'] + '/' + e['model']] = round(sum(x['score'] for x in summary if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing') / 6, 1)
+    errors: dict[str, int] = {}
+    for row in rows:
+        if row['status'] == 'error':
+            key = f"{row['endpoint']}/{row['model']}/{row['category']}"
+            errors[key] = errors.get(key, 0) + 1
+    return {'models': models, 'categories': config.get('categories', CATEGORIES),
+            'summary': summary, 'composites': composites, 'complete': complete, 'errors': errors}
+
+def serialize_run(run_id: str) -> dict[str, Any]:
+    with connect_db() as db:
+        run = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, 'Run not found.')
+        data = json.loads(run['data'])
+        rows = [dict(r) for r in db.execute('SELECT * FROM results WHERE run_id=? ORDER BY rowid', (run_id,))]
+        rollup = rollup_results(json.loads(run['config']), run['state'], run['progress'], run['total'], rows)
     return {'id': run['id'], 'created': run['created'], 'depth': run['depth'], 'state': run['state'],
-            'progress': run['progress'], 'total': run['total'], 'models': config['models'],
-            'categories': config.get('categories', CATEGORIES), 'results': rows, 'summary': summaries, 'composites': composites,
-            'complete': complete, 'events': data.get('events', [])[-20:], 'error': run['error']}
+            'progress': run['progress'], 'total': run['total'], 'models': rollup['models'],
+            'categories': rollup['categories'], 'results': rows, 'summary': rollup['summary'],
+            'composites': rollup['composites'], 'complete': rollup['complete'],
+            'events': data.get('events', [])[-20:], 'error': run['error']}
+
+def publish_to_bench(run_id: str) -> None:
+    """Copy a completed run's per-model rollup into the saved bench.
+
+    One entry per endpoint and model: benching the same model again replaces its
+    entry instead of adding a duplicate. The run's own data stays untouched, and
+    a rerun that produced no graded answers is skipped so errors never wipe
+    good bench data.
+    """
+    with connect_db() as db:
+        run = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+    if not run or run['state'] != 'completed': return
+    with connect_db() as db:
+        rows = [dict(r) for r in db.execute('SELECT endpoint,model,category,score,elapsed,tokens,status FROM results WHERE run_id=?', (run_id,))]
+    rollup = rollup_results(json.loads(run['config']), run['state'], run['progress'], run['total'], rows)
+    updates = []
+    for entry in rollup['models']:
+        model_rows = [r for r in rows if r['endpoint'] == entry['endpoint'] and r['model'] == entry['model']]
+        if not any(r['score'] is not None for r in model_rows): continue
+        payload = {'composite': rollup['composites'].get(entry['endpoint'] + '/' + entry['model']),
+                   'summary': [x for x in rollup['summary'] if x['endpoint'] == entry['endpoint'] and x['model'] == entry['model']],
+                   'errors': {}}
+        for row in model_rows:
+            if row['status'] == 'error':
+                key = row['category']
+                payload['errors'][key] = payload['errors'].get(key, 0) + 1
+        updates.append((entry['endpoint'], entry['model'], utc_now(), run['id'], run['created'], run['depth'], json.dumps(payload)))
+    with connect_db() as db:
+        db.executemany('INSERT INTO bench_models(endpoint,model,updated,run_id,run_created,run_depth,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(endpoint,model) DO UPDATE SET updated=excluded.updated, run_id=excluded.run_id, run_created=excluded.run_created, run_depth=excluded.run_depth, data=excluded.data', updates)
+
+def read_bench() -> dict[str, Any]:
+    with connect_db() as db:
+        entries = db.execute('SELECT endpoint,model,updated,run_id,run_created,run_depth,data FROM bench_models ORDER BY updated DESC').fetchall()
+    models = []
+    for entry in entries:
+        payload = json.loads(entry['data'])
+        models.append({'endpoint': entry['endpoint'], 'model': entry['model'], 'updated': entry['updated'],
+                       'run_id': entry['run_id'], 'run_created': entry['run_created'], 'run_depth': entry['run_depth'],
+                       'composite': payload.get('composite'), 'summary': payload.get('summary', []),
+                       'errors': payload.get('errors', {})})
+    return {'models': models}
+
+def read_datasets() -> list[dict[str, Any]]:
+    """A copy of each run's rollup, without the full per-attempt responses."""
+    datasets = []
+    with connect_db() as db:
+        runs = db.execute('SELECT id,created,depth,state,progress,total,config,error FROM runs ORDER BY created DESC LIMIT 100').fetchall()
+        for run in runs:
+            rows = [dict(r) for r in db.execute('SELECT endpoint,model,category,score,elapsed,tokens,status FROM results WHERE run_id=?', (run['id'],))]
+            rollup = rollup_results(json.loads(run['config']), run['state'], run['progress'], run['total'], rows)
+            datasets.append({'id': run['id'], 'created': run['created'], 'depth': run['depth'], 'state': run['state'],
+                             'progress': run['progress'], 'total': run['total'], 'error': run['error'],
+                             'models': rollup['models'], 'categories': rollup['categories'], 'summary': rollup['summary'],
+                             'composites': rollup['composites'], 'complete': rollup['complete'], 'errors': rollup['errors']})
+    return datasets
 
 async def execute_run(run_id: str) -> None:
     with connect_db() as db:
@@ -276,6 +396,7 @@ async def execute_run(run_id: str) -> None:
                         db.execute('UPDATE runs SET progress=? WHERE id=?', (progress, run_id))
     with connect_db() as db:
         db.execute("UPDATE runs SET state='completed' WHERE id=?", (run_id,))
+    publish_to_bench(run_id)
 
 AA_KEY = os.getenv('AA_API_KEY', '').strip()
 def refresh_seconds() -> int:
@@ -291,7 +412,6 @@ aa_log = logging.getLogger('bench.aa')
 
 def utc_now() -> str:
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-
 def read_setting(key: str) -> Any:
     with connect_db() as db:
         row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
@@ -399,6 +519,26 @@ async def list_runs():
 
 @app.get('/api/runs/{run_id}')
 async def get_run(run_id: str): return serialize_run(run_id)
+
+@app.get('/api/datasets')
+async def get_datasets(): return read_datasets()
+
+@app.get('/api/bench')
+async def get_bench(): return read_bench()
+
+@app.get('/api/bench/setup')
+async def get_bench_setup():
+    stored = read_setting('bench_setup')
+    if stored is None:
+        return {'endpoints': [], 'depth': 'Quick', 'categories': CATEGORIES}
+    return stored
+
+@app.put('/api/bench/setup')
+async def put_bench_setup(setup: BenchSetup):
+    payload = {'endpoints': [endpoint.model_dump() for endpoint in setup.endpoints],
+               'depth': setup.depth, 'categories': setup.categories}
+    write_settings([('bench_setup', payload)])
+    return {'saved': True}
 
 @app.post('/api/runs/{run_id}/{action}')
 async def control_run(run_id: str, action: str):
