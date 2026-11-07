@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pydantic
 
 from backend.app import main
 
@@ -156,6 +157,88 @@ class FrontendAssetTests(unittest.TestCase):
         for reference in re.findall(r'url\("([^"]+)"\)', stylesheet):
             with self.subTest(reference=reference):
                 self.assertTrue((frontend / 'assets' / reference).is_file())
+
+
+class SavedBenchTests(unittest.IsolatedAsyncioTestCase):
+    def temporary_db(self):
+        return tempfile.TemporaryDirectory()
+
+    def insert_run(self, run_id, created, rows, state='completed', depth='Quick', models=None):
+        config = {'models': models or [{'endpoint': 'one', 'model': 'm'}], 'endpoints': [], 'categories': main.CATEGORIES}
+        with main.connect_db() as db:
+            db.execute("INSERT INTO runs(id,created,depth,state,config,progress,total) VALUES(?,?,?,?,?,?,?)",
+                       (run_id, created, depth, state, json.dumps(config), len(rows), len(rows)))
+            for endpoint, model, category, score, status in rows:
+                db.execute("INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                           (run_id, endpoint, model, category, '?', '', score, .1, 1, status))
+
+    async def test_same_model_is_overwritten_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            self.insert_run('first', '2026-11-01T00:00:00Z', [('one', 'm', 'Knowledge', 0, 'ok')])
+            main.publish_to_bench('first')
+            self.insert_run('second', '2026-11-02T00:00:00Z', [('one', 'm', 'Knowledge', 1, 'ok')], depth='Standard')
+            main.publish_to_bench('second')
+            bench = await main.get_bench()
+            self.assertEqual(len(bench['models']), 1)
+            entry = bench['models'][0]
+            self.assertEqual((entry['endpoint'], entry['model']), ('one', 'm'))
+            self.assertEqual(entry['run_id'], 'second')
+            self.assertEqual(entry['run_depth'], 'Standard')
+            knowledge = next(row for row in entry['summary'] if row['category'] == 'Knowledge')
+            self.assertEqual(knowledge['score'], 100)
+
+    async def test_run_without_graded_answers_never_overwrites_the_bench(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            self.insert_run('good', '2026-11-01T00:00:00Z', [('one', 'm', 'Knowledge', 1, 'ok')])
+            main.publish_to_bench('good')
+            self.insert_run('broken', '2026-11-02T00:00:00Z', [('one', 'm', 'Knowledge', None, 'error')])
+            main.publish_to_bench('broken')
+            bench = await main.get_bench()
+            self.assertEqual(len(bench['models']), 1)
+            self.assertEqual(bench['models'][0]['run_id'], 'good')
+
+    async def test_datasets_keep_one_copy_per_run(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            self.insert_run('first', '2026-11-01T00:00:00Z', [('one', 'm', 'Knowledge', 0, 'ok')])
+            main.publish_to_bench('first')
+            self.insert_run('second', '2026-11-02T00:00:00Z', [('one', 'm', 'Knowledge', 1, 'ok')])
+            main.publish_to_bench('second')
+            datasets = await main.get_datasets()
+            self.assertEqual([item['id'] for item in datasets], ['second', 'first'])
+            scores = {item['id']: next(row['score'] for row in item['summary'] if row['category'] == 'Knowledge') for item in datasets}
+            self.assertEqual(scores, {'first': 0, 'second': 100})
+            # The copy carries error counts instead of raw answers, and marks models without composite.
+            self.assertTrue(all('errors' in item and 'models' in item for item in datasets))
+
+    async def test_completed_runs_are_benched_on_restart(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            self.insert_run('old', '2026-11-01T00:00:00Z', [('one', 'm', 'Knowledge', 1, 'ok')])
+            main.initialize()
+            bench = await main.get_bench()
+            self.assertEqual(len(bench['models']), 1)
+            self.assertEqual(bench['models'][0]['run_id'], 'old')
+
+    async def test_bench_setup_roundtrip(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            default = await main.get_bench_setup()
+            self.assertEqual(default, {'endpoints': [], 'depth': 'Quick', 'categories': main.CATEGORIES})
+            setup = main.BenchSetup(
+                endpoints=[{'name': 'Hugo main server', 'url': 'http://ollama:11434/v1',
+                            'models': ['gemma3:1b'], 'found': [{'id': 'gemma3:1b', 'owned_by': 'library'}]}])
+            await main.put_bench_setup(setup)
+            stored = await main.get_bench_setup()
+            self.assertEqual(stored['depth'], 'Quick')
+            self.assertEqual(stored['endpoints'][0]['models'], ['gemma3:1b'])
+            self.assertEqual(stored['endpoints'][0]['url'], 'http://ollama:11434/v1')
+            with self.assertRaises(pydantic.ValidationError):
+                main.BenchSetup(endpoints=[{'name': 'x', 'url': 'https://user:pass@example.com/v1', 'models': []}])
+            with self.assertRaises(pydantic.ValidationError):
+                main.BenchSetup(depth='Nope')
 
 
 if __name__ == '__main__':

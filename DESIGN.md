@@ -46,10 +46,11 @@ A lane shows at most 240 marks. Larger runs group attempts into one mark that sh
 
 ## Views
 
-- **Bench:** A wide pane to connect endpoints and choose models, beside a fixed run setup rail. The headline shrinks once an endpoint is connected, so the model list gets the room.
+- **Bench:** A wide pane to connect endpoints and choose models, beside a fixed run setup rail. The headline shrinks once an endpoint is connected, so the model list gets the room. Bench setup (endpoints, ticks, depth and categories) is stored on the server, so a reload keeps the model selection.
 - **Runs:** One full-width table. The whole row opens the run.
+- **Datasets:** One saved copy of each run's data, newest first, without the attempt tape or raw answers.
 - **Run (`#run/<id>`):** Heading and progress, the tape, then scores beside the attempt inspector.
-- **Compare:** A run picker, the score matrix, and timing and tokens per category.
+- **Compare:** A run picker, the score matrix, and timing and tokens per category (Model and Category are dropdown filters). Below them, the saved bench keeps the latest data per model; a model benched again overwrites its entry instead of duplicating it, and the run copies in Datasets are never modified.
 
 ## Compare charts
 
