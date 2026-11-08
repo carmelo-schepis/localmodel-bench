@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATA_DIR: ${{ runner.temp }}/bench-data
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
