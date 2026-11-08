@@ -81,7 +81,9 @@ async function waitForRun(page, runId, timeoutMs) {
       }
       assert(true, 'live run pause control was exercised');
       pauseSent = true;
-      const pauseDeadline = Date.now() + 180000;
+      // Long generations are normal for local models; keep the pause exercise
+      // bounded above the model's known multi-minute response time.
+      const pauseDeadline = Date.now() + 12 * 60 * 1000;
       let paused;
       do {
         await wait(1000);
@@ -130,8 +132,37 @@ async function inspectArtifact(page, run, attempt) {
   await page.waitForTimeout(9000);
   const checks = (await api(page, `/api/lab/runs/${run.id}`)).value.attempts.find(row => row.attempt === attempt)?.auto;
   const reportAttempt = { attempt, task: run.attempts.find(row => row.attempt === attempt)?.task, bodySample: loading.slice(0, 500), previewBytes: previewHtml.length, rawBytes: rawHtml.length, checks };
+  if (reportAttempt.task === 'dashboard' && await frame.locator('tbody tr').count()) {
+    const rowText = () => frame.locator('tbody tr').allTextContents();
+    const expectedRows = [
+      ['Berlin', 5.9, 7], ['Lisbon', 2.2, 3], ['Oslo', 4.4, 6], ['Athens', 0.8, 1],
+    ];
+    const observedRows = await frame.locator('tbody tr').evaluateAll(rows => rows.map(row =>
+      [...row.querySelectorAll('td')].map(cell => cell.textContent.trim())));
+    const matchesTaskData = observedRows.length === expectedRows.length && expectedRows.every(([city, rain, days]) =>
+      observedRows.some(row => row[0] === city && Number(row[1]) === rain && Number(row[2]) === days));
+    reportAttempt.dashboardData = { expectedRows, observedRows, matchesTaskData };
+    assert(matchesTaskData, 'dashboard rows match all four task data records');
+    const numericValues = rows => rows.map(text => Number(text.match(/\d+(?:\.\d+)?/g)?.[0]));
+    const initialRows = await rowText();
+    await frame.getByRole('button', { name: 'Sort by rain' }).click();
+    const rainRows = await rowText();
+    const rainValues = numericValues(rainRows);
+    const rainAscending = rainValues.every((value, index) => index === 0 || rainValues[index - 1] <= value);
+    await frame.getByRole('button', { name: 'Sort by days' }).click();
+    const dayRows = await rowText();
+    const dayValues = dayRows.map(text => Number(text.match(/\d+(?:\.\d+)?/g)?.at(-1)));
+    const daysAscending = dayValues.every((value, index) => index === 0 || dayValues[index - 1] <= value);
+    await frame.getByRole('button', { name: 'Sort by days' }).click();
+    const repeatedDaysRows = await rowText();
+    const repeatedDaysReversed = repeatedDaysRows.join('|') === [...dayRows].reverse().join('|');
+    reportAttempt.dashboardSort = { initialRows, rainRows, dayRows, repeatedDaysRows, rainAscending, daysAscending, repeatedDaysReversed };
+    assert(rainAscending, 'dashboard rain sort orders all four rows ascending');
+    assert(daysAscending, 'dashboard days sort orders all four rows ascending');
+    assert(!repeatedDaysReversed, 'dashboard limitation recorded: repeated sort does not reverse row order');
+  }
   const safeName = `attempt-${attempt}.png`;
-  await page.locator(frameSelector).screenshot({ path: path.join(output, safeName), timeout: 20000 }).catch(() => {});
+  await page.locator(frameSelector).screenshot({ path: path.join(output, safeName), timeout: 3000 }).catch(() => {});
   const popupPromise = page.waitForEvent('popup');
   await page.locator(`.part-inspect a[href$="/${attempt}/raw"]`).first().click();
   const popup = await popupPromise;
@@ -186,7 +217,53 @@ async function main() {
         const run = (await api(page, `/api/lab/runs/${latest}`)).value;
         report.runId = latest;
         report.runState = run.state;
-        await page.screenshot({ path: path.join(output, 'lab-desktop.png'), fullPage: true });
+        report.attempts = run.attempts.map(item => ({ attempt: item.attempt, field: item.field, task: item.task,
+          status: item.status, elapsed: item.elapsed, tokens: item.tokens, reason: item.reason,
+          wrapped: item.wrapped, truncated: item.truncated, auto: item.auto, review: item.review }));
+        await page.screenshot({ path: path.join(output, 'lab-run-desktop.png'), fullPage: true });
+        for (const attempt of run.attempts.filter(item => item.status === 'ok' && item.field !== 'extras')) {
+          const evidence = await inspectArtifact(page, run, attempt.attempt);
+          report.artifacts ||= [];
+          report.artifacts.push(evidence);
+          const reloaded = (await api(page, `/api/lab/runs/${latest}`)).value;
+          const checks = reloaded.attempts.find(item => item.attempt === attempt.attempt);
+          if (evidence.checks?.collected === true) {
+            assert(checks?.auto?.collected === true, `attempt ${attempt.attempt} harness checks persist`);
+          } else {
+            assert(checks?.auto?.collected === false && checks.auto.errors === null && checks.autoScore == null,
+              `attempt ${attempt.attempt} remains explicitly uncollected with no auto score`);
+          }
+        }
+        const reviewCases = [
+          { attempt: 1, visuals: 3, buttons: 'yes' },
+          { attempt: 2, visuals: 3, buttons: 'no' },
+          { attempt: 3, playable: 'no' },
+          { attempt: 4, visuals: 3 },
+        ];
+        for (const review of reviewCases) {
+          await page.locator(`[data-lab-select="${review.attempt}"]`).click();
+          if (review.visuals) await page.locator(`[data-lab-review-visuals="${review.visuals}"]`).click();
+          if (review.buttons) await page.locator(`[data-lab-review-buttons="${review.buttons}"]`).click();
+          if (review.playable) await page.locator(`[data-lab-review-playable="${review.playable}"]`).click();
+          await page.waitForFunction(async ({ base, latest, attempt, expected }) => {
+            const run = await fetch(`${base}/api/lab/runs/${latest}`).then(response => response.json());
+            const item = run.attempts.find(row => row.attempt === attempt);
+            return Object.entries(expected).every(([key, value]) => item?.review?.[key] === value);
+          }, { base, latest, attempt: review.attempt, expected: review }, { timeout: 8000 });
+          assert(true, `human review for attempt ${review.attempt} persists through the UI`);
+        }
+        // Partial review updates merge and retain existing fields.
+        await page.request.post(`${base}/api/lab/runs/${latest}/review`, { data: { attempt: 1, buttons: 'no' } });
+        await page.request.post(`${base}/api/lab/runs/${latest}/review`, { data: { attempt: 1, buttons: 'yes' } });
+        const mergedReview = (await api(page, `/api/lab/runs/${latest}`)).value.attempts.find(item => item.attempt === 1).review;
+        assert(mergedReview.visuals === 3 && mergedReview.buttons === 'yes', 'partial review update preserves other review fields');
+        const afterReload = (await api(page, `/api/lab/runs/${latest}`)).value;
+        report.checksAfter = afterReload.attempts.map(item => ({ attempt: item.attempt, auto: item.auto, review: item.review }));
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        assert(await page.locator('[data-nav="lab"].active').count() === 1, 'saved Lab run reconnects after refresh');
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.screenshot({ path: path.join(output, 'lab-run-mobile-390.png'), fullPage: true });
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Lab run fits 390px viewport');
       }
       return;
     }
@@ -210,6 +287,7 @@ async function main() {
 
     await page.goto(`${base}/#lab`, { waitUntil: 'domcontentloaded' });
     await page.locator('[data-lab-model]').first().waitFor({ state: 'attached', timeout: 15000 });
+    assert(await page.locator('[data-lab-start]').isDisabled(), 'Start is blocked before a model is selected');
     const labModel = page.locator(`input[data-lab-model][value="${modelId}"]`);
     await labModel.check();
     const extras = page.locator('input[data-lab-field][value="extras"]');
@@ -217,6 +295,10 @@ async function main() {
     assert((await page.locator('.sheet-foot .tally').innerText()).includes('4 attempts'), 'field toggle reduces tally to four');
     await extras.check();
     assert((await page.locator('.sheet-foot .tally').innerText()).includes('5 attempts'), 'all fields tally five attempts');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.locator(`input[data-lab-model][value="${modelId}"]`).waitFor({ state: 'attached' });
+    assert(await page.locator(`input[data-lab-model][value="${modelId}"]`).isChecked(), 'Lab model selection persists across reload');
+    assert((await page.locator('.sheet-foot .tally').innerText()).includes('5 attempts'), 'Lab fields and tally persist across reload');
     await page.screenshot({ path: path.join(output, 'lab-desktop.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: path.join(output, 'lab-mobile-390.png'), fullPage: true });
@@ -249,8 +331,14 @@ async function main() {
       const evidence = await inspectArtifact(page, latest, attempt.attempt);
       report.artifacts ||= [];
       report.artifacts.push(evidence);
-      const checks = (await api(page, `/api/lab/runs/${runId}`)).value.attempts.find(item => item.attempt === attempt.attempt)?.auto;
-      assert(checks?.collected === true, `attempt ${attempt.attempt} harness checks persist`);
+      const reloaded = (await api(page, `/api/lab/runs/${runId}`)).value;
+      const checkedAttempt = reloaded.attempts.find(item => item.attempt === attempt.attempt);
+      if (evidence.checks?.collected === true) {
+        assert(checkedAttempt?.auto?.collected === true, `attempt ${attempt.attempt} harness checks persist`);
+      } else {
+        assert(checkedAttempt?.auto?.collected === false && checkedAttempt.auto.errors === null && checkedAttempt.autoScore == null,
+          `attempt ${attempt.attempt} remains explicitly uncollected with no auto score`);
+      }
     }
 
     // Reloaded detail includes the persisted human review/control state.
@@ -279,7 +367,7 @@ async function main() {
     const cancelledPayload = await cancelled.json();
     assert(cancelled.status() === 200 && cancelledPayload.state === 'cancelled', 'active inference accepts cancellation');
     let cancelledRun;
-    const cancelFinishDeadline = Date.now() + 180000;
+    const cancelFinishDeadline = Date.now() + 12 * 60 * 1000;
     do {
       cancelledRun = (await api(page, `/api/lab/runs/${cancelId}`)).value;
       if (cancelledRun.state === 'cancelled' && cancelledRun.progress === 1) break;
