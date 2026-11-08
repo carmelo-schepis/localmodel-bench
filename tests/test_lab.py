@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import httpx
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +19,20 @@ ARTIFACT = """<!doctype html><html><body>
   const m = document.createElement('p'); m.textContent = 'clicked ' + b.textContent; document.body.append(m);
 }))</script>
 </body></html>"""
+
+
+class LabStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_artifact_requests_disable_reasoning_and_read_content(self):
+        def respond(request):
+            payload = json.loads(request.content)
+            self.assertEqual(payload['reasoning_effort'], 'none')
+            self.assertEqual(payload['max_tokens'], 512)
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n\n')
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch.object(lab.httpx, 'AsyncClient', return_value=client):
+            result = await lab.complete_stream('http://ollama/v1', 'qwen3.5:4b', 'Return JSON', 512)
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['content'], '{}')
 
 
 def run_config(depth='Quick'):

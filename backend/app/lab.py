@@ -333,6 +333,7 @@ async def complete_stream(url: str, model: str, prompt: str, max_tokens: int) ->
             response = await client.post(url + '/chat/completions', json={
                 'model': model, 'messages': [{'role': 'user', 'content': prompt}],
                 'temperature': 0, 'stream': True, 'max_tokens': max_tokens,
+                'reasoning_effort': 'none',
                 'stream_options': {'include_usage': True}})
             response.raise_for_status()
             async for line in response.aiter_lines():
