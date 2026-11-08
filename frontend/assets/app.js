@@ -56,7 +56,8 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 
 function route() {
   const [view, id] = location.hash.slice(1).split('/');
-  return ['bench', 'runs', 'datasets', 'compare', 'run'].includes(view) && (view !== 'run' || id) ? { view, id } : { view: 'bench' };
+  const allowed = ['bench', 'runs', 'datasets', 'compare', 'run', 'lab', 'labrun'];
+  return allowed.includes(view) && (view !== 'run' || id) && (view !== 'labrun' || id) ? { view, id } : { view: 'bench' };
 }
 
 async function api(path, options = {}) {
@@ -102,7 +103,7 @@ function paint(view, parts) {
 
 function render() {
   const { view, id } = route();
-  const section = view === 'run' ? 'runs' : view;
+  const section = view === 'run' ? 'runs' : view === 'labrun' ? 'lab' : view;
   document.querySelectorAll('[data-nav]').forEach(link => {
     const current = link.dataset.nav === section;
     link.classList.toggle('active', current);
@@ -112,6 +113,8 @@ function render() {
   else if (view === 'datasets') paint('datasets', datasetsView());
   else if (view === 'compare') paint('compare', compareView());
   else if (view === 'run') paint('run:' + id, runView(id));
+  else if (view === 'lab') paint('lab', labView());
+  else if (view === 'labrun') paint('labrun:' + id, labRunView(id));
   else paint('bench', benchView());
 }
 
@@ -1032,6 +1035,11 @@ let navigation = 0;
 async function syncRoute() {
   const current = ++navigation;
   const { view, id } = route();
+  if (view === 'lab' || view === 'labrun') {
+    stopWatching();
+    if (typeof labSyncRoute === 'function') await labSyncRoute(view, id);
+    return;
+  }
   if (view === 'run') {
     if (state.active?.id !== id) { state.active = null; state.attempt = null; }
     state.runError = '';
