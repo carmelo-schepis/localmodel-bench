@@ -31,7 +31,10 @@ const labState = {
   previewState: {},
   previewOpenedAt: {},
   pendingChecks: new Map(),
-  checksSent: new Set(),
+  checksSaved: new Set(),
+  checksInFlight: new Set(),
+  checksTries: new Map(),
+  checksErrors: {},
 };
 
 /* ------------------------------- Data ------------------------------- */
@@ -122,9 +125,14 @@ function labWatchRun(id) {
 /* Reopen a saved run the user navigates to from the lab list. */
 async function labOpenForReview(id) {
   try {
-    labState.active = await labApi('/runs/' + id);
+    const run = await labApi('/runs/' + id);
+    if (labState.activeId !== id) return;
+    labState.active = run;
     labState.activeId = id;
     labState.activeError = '';
+    run.attempts.forEach(item => {
+      if (item.auto && typeof item.auto.collected === 'boolean') labState.checksSaved.add(`${id}:${item.attempt}`);
+    });
   } catch (error) {
     labState.activeError = error.message;
     labState.active = null;
@@ -140,6 +148,10 @@ async function labSyncRoute(view, id) {
       labState.active = null;
       labState.attempt = null;
       labState.preview = null;
+      labState.previewState = {};
+      labState.previewNonce = '';
+      labState.pendingChecks.clear();
+      labState.checksErrors = {};
       labState.activeError = '';
       render();
       await labOpenForReview(id);
@@ -288,7 +300,7 @@ function labHead(run) {
     </div>
     <div class="run-count">
       <b aria-label="${run.progress} of ${run.total} attempts">${run.progress.toLocaleString()}<span>/${run.total.toLocaleString()}</span></b>
-      ${live ? '<button class="button cancel-run" data-lab-cancel>Cancel lab run</button>' : '<a class="button" href="#lab">New lab run</a>'}
+      ${live ? `${run.state === 'running' ? '<button class="button quiet" data-lab-pause>Pause</button>' : ''}${run.state === 'paused' ? '<button class="button" data-lab-resume>Resume</button>' : ''}<button class="button cancel-run" data-lab-cancel>Cancel lab run</button>` : '<a class="button" href="#lab">New lab run</a>'}
     </div>
   </header>`;
 }
@@ -339,13 +351,13 @@ function labCheckList(item) {
     if (item.status !== 'ok') return '<li class="lab-check is-skip">No checks ran<small>no artifact to check</small></li>';
     return '<li class="lab-check is-skip">Auto checks not collected<small>open the preview once to run them</small></li>';
   }
-  if ((item.auto || {}).collected === false) return '<li class="lab-check is-fail">Auto checks not collected<small>the harness could not reach the artifact</small></li>';
   return checks.map(check => `<li class="lab-check ${check.pass === true ? 'is-pass' : check.pass === false ? 'is-fail' : 'is-skip'}">${esc(check.name)}<small>${esc(check.detail || (check.pass === true ? 'passed' : check.pass === false ? 'failed' : 'not measured'))}</small></li>`).join('');
 }
 
 function labReviewControls(item) {
   const review = item.review || {};
   if (item.status !== 'ok') return '<p class="note">Nothing to review: this attempt did not produce an artifact.</p>';
+  if (item.field === 'extras') return '<p class="note">This deterministic JSON task has no artifact review controls.</p>';
   const visuals = [1, 2, 3, 4, 5].map(n =>
     `<button type="button" class="button quiet lab-rate ${review.visuals === n ? 'is-on' : ''}" data-lab-review-visuals="${n}" aria-pressed="${review.visuals === n}">${n}</button>`).join('');
   const buttonsVerdict = [['yes', 'All buttons work'], ['no', 'Buttons broken']].map(([value, label]) =>
@@ -361,13 +373,9 @@ function labReviewControls(item) {
 }
 
 function labPreviewFrame(run, item) {
-  if (labState.preview !== item.attempt) {
-    return `<button type="button" class="button" data-lab-preview="${item.attempt}" ${item.status === 'ok' ? '' : 'disabled'}>Open preview</button>
-      <a class="button" href="/api/lab/artifacts/${esc(run.id)}/${item.attempt}/raw" target="_blank" rel="noopener">Open full preview</a>`;
-  }
-  const stateInfo = labState.previewState[item.attempt];
-  const note = stateInfo === 'timeout'
-    ? '<p class="warning">Auto checks could not reach this artifact in time. Showing the preview without verdicts.</p>' : '';
+  if (labState.preview !== item.attempt) return '';
+  const nonce = labState.previewNonce;
+  const src = `/api/lab/runs/${encodeURIComponent(run.id)}/artifacts/${item.attempt}?labRun=${encodeURIComponent(run.id)}&attempt=${item.attempt}&nonce=${encodeURIComponent(nonce)}`;
   return `<div class="lab-preview">
     <div class="lab-preview-bar">
       <span>Sandboxed preview — click inside once to give it the keyboard</span>
@@ -376,8 +384,7 @@ function labPreviewFrame(run, item) {
         <button type="button" class="button quiet" data-lab-preview="${item.attempt}">Close preview</button>
       </span>
     </div>
-    ${note}
-    <iframe sandbox="allow-scripts" src="/api/lab/runs/${esc(run.id)}/artifacts/${item.attempt}" title="Sandboxed preview of attempt ${item.attempt}" data-lab-frame="${item.attempt}"></iframe>
+    <iframe sandbox="allow-scripts" src="${esc(src)}" title="Sandboxed preview of attempt ${item.attempt}" data-lab-frame="${item.attempt}" data-lab-nonce="${esc(nonce)}" loading="eager"></iframe>
   </div>`;
 }
 
@@ -405,7 +412,9 @@ function labInspector(run) {
       <div class="block-head small"><h3>Auto checks</h3><span>${typeof item.autoScore === 'number' ? `${Math.round(item.autoScore)}<small>/100</small>` : 'no score yet'}</span></div>
       <ul class="lab-checks">${labCheckList(item)}</ul>
       ${item.field === 'extras' ? '' : `<div class="block-head small"><h3>Preview</h3></div>
-      ${labPreviewFrame(run, item)}
+      ${labState.preview === item.attempt ? '' : `<button type="button" class="button" data-lab-preview="${item.attempt}" ${item.status === 'ok' ? '' : 'disabled'}>Open preview</button>`}
+      ${item.status === 'ok' ? `<a class="button" href="/api/lab/artifacts/${esc(run.id)}/${item.attempt}/raw" target="_blank" rel="noopener">Open full preview</a>` : ''}
+      ${labState.checksErrors[`${run.id}:${item.attempt}`] ? `<p class="error" role="alert">Checks could not be saved: ${esc(labState.checksErrors[`${run.id}:${item.attempt}`])}</p>${(labState.checksTries.get(`${run.id}:${item.attempt}`) || 0) < 3 ? '<button type="button" class="button quiet" data-lab-check-retry>Retry saving checks</button>' : '<p class="note">Retry limit reached. Reload the artifact preview to collect a fresh result.</p>'}` : ''}
       <div class="block-head small"><h3>Your review</h3></div>`}
       ${labReviewControls(item)}
     </div>
@@ -443,10 +452,17 @@ function labRunView(id) {
       head: `<header class="page-head"><div><h1>${labState.activeError ? 'Lab run not available.' : 'Opening lab run.'}</h1>${labState.activeError ? `<p class="lead">${esc(labState.activeError)}</p>` : ''}</div></header>`,
       tape: labState.activeError ? '<div class="empty"><a class="button" href="#lab">Back to the lab</a></div>' : '',
       inspect: '',
+      preview: '',
       rollup: '',
     };
   }
-  return { head: labHead(run), tape: labTape(run), inspect: labInspector(run), rollup: labRollup(run) };
+  const currentAttempt = labSelectedAttemptFor(run);
+  const item = currentAttempt ? run.attempts[currentAttempt - 1] : null;
+  return { head: labHead(run), tape: labTape(run), inspect: labInspector(run), preview: item ? labPreviewFrame(run, item) : '', rollup: labRollup(run) };
+}
+
+function labSelectedAttemptFor(run) {
+  return (labState.attempt !== null && labState.attempt <= run.attempts.length ? labState.attempt : run.attempts.length) || null;
 }
 
 /* ------------------------------ Harness link ------------------------- */
@@ -459,8 +475,10 @@ function labSelectedAttempt() {
 
 async function labReview(patch) {
   if (!patch.attempt) return;
+  const runId = labState.activeId;
   try {
-    const result = await labApi(`/runs/${labState.active.id}/review`, { method: 'POST', body: JSON.stringify(patch) });
+    const result = await labApi(`/runs/${encodeURIComponent(runId)}/review`, { method: 'POST', body: JSON.stringify(patch) });
+    if (labState.activeId !== runId || labState.active?.id !== runId) return;
     const item = labState.active?.attempts.find(entry => entry.attempt === patch.attempt);
     if (item) item.review = result.review;
   } catch (error) {
@@ -475,42 +493,71 @@ addEventListener('message', event => {
   if (!data || data.source !== 'lab-harness') return;
   const frame = [...app.querySelectorAll('iframe')].find(item => item.contentWindow === event.source);
   if (!frame) return;
-  const match = /artifacts\/(\d+)/.exec(frame.src);
-  if (!match) return;
-  const attempt = Number(match[1]);
+  const runId = labState.activeId;
+  const attempt = Number(frame.dataset.labFrame);
+  if (!runId || !labState.active || labState.active.id !== runId || route().id !== runId ||
+      frame.dataset.labNonce !== data.nonce || data.runId !== runId || Number(data.attempt) !== attempt ||
+      labState.preview !== attempt) return;
+  const key = `${runId}:${attempt}`;
+  if (labState.checksSaved.has(key)) return;
   labState.previewState[attempt] = 'ok';
   labState.pendingChecks.set(attempt, {
     attempt,
     collected: data.collected !== false,
-    errors: Number.isInteger(data.errors) ? Math.min(Math.max(data.errors, 0), 10_000) : 0,
-    canvas: data.canvas === true,
+    errors: Number.isInteger(data.errors) ? Math.min(Math.max(data.errors, 0), 10_000) : null,
+    canvas: data.canvas === true ? true : data.canvas === false ? false : null,
     animation: data.animation === true ? true : data.animation === false ? false : null,
-    structure: data.structure === true,
+    structure: data.structure === true ? true : data.structure === false ? false : null,
     buttonCount: Number.isInteger(data.buttonCount) ? Math.min(Math.max(data.buttonCount, 0), 10_000) : 0,
     buttons: Array.isArray(data.buttons) ? data.buttons.slice(0, 25) : [],
+    controlsTested: Number.isInteger(data.controlsTested) ? Math.min(Math.max(data.controlsTested, 0), 25) : null,
+    controlsCapped: data.controlsCapped === true,
+    inputFound: data.inputFound === true ? true : data.inputFound === false ? false : null,
+    inputTyped: data.inputTyped === true ? true : data.inputTyped === false ? false : null,
+    inputValid: data.inputValid === true ? true : data.inputValid === false ? false : null,
+    inputValidationMessage: typeof data.inputValidationMessage === 'string' ? data.inputValidationMessage.slice(0, 300) : null,
+    rowCount: Number.isInteger(data.rowCount) ? Math.min(Math.max(data.rowCount, 0), 10_000) : null,
   });
-  labPostChecks(attempt);
+  labState.checksErrors[key] = '';
+  labPostChecks(runId, attempt);
   if (labState.preview === attempt) render();
 });
 
-function labPostChecks(attempt) {
+async function labPostChecks(runId, attempt) {
+  const key = `${runId}:${attempt}`;
   const payload = labState.pendingChecks.get(attempt);
-  if (!payload || labState.checksSent.has(attempt)) return;
-  labState.checksSent.add(attempt);
-  labApi(`/runs/${labState.activeId}/checks`, { method: 'POST', body: JSON.stringify(payload) })
-    .then(() => labRefresh(labState.activeId)())
-    .catch(() => {});
+  if (!payload || runId !== labState.activeId || labState.checksSaved.has(key) || labState.checksInFlight.has(key)) return;
+  const tries = labState.checksTries.get(key) || 0;
+  if (tries >= 3) return;
+  labState.checksInFlight.add(key);
+  labState.checksTries.set(key, tries + 1);
+  try {
+    await labApi(`/runs/${encodeURIComponent(runId)}/checks`, { method: 'POST', body: JSON.stringify(payload) });
+    if (labState.activeId !== runId) return;
+    labState.checksSaved.add(key);
+    labState.checksErrors[key] = '';
+    await labRefresh(runId)();
+  } catch (error) {
+    if (labState.activeId !== runId) return;
+    labState.checksErrors[key] = error.message;
+    if (route().view === 'labrun' && route().id === runId) render();
+  } finally {
+    labState.checksInFlight.delete(key);
+  }
 }
 
 /* Auto-check timeout: eight seconds, then the attempt shows 'not collected'. */
 setInterval(() => {
   const attempt = labState.preview;
   if (!attempt || !labState.active || labState.activeId !== labState.active.id) return;
-  if (labState.previewState[attempt] === 'ok' || labState.checksSent.has(attempt)) return;
+  const runId = labState.activeId;
+  const key = `${runId}:${attempt}`;
+  if (labState.previewState[attempt] === 'ok' || labState.checksSaved.has(key) || labState.pendingChecks.has(attempt)) return;
   if (Date.now() - (labState.previewOpenedAt[attempt] || 0) > 8000) {
     labState.previewState[attempt] = 'timeout';
-    labState.pendingChecks.set(attempt, { attempt, collected: false, errors: 0, buttonCount: 0, buttons: [], canvas: null, animation: null, structure: null });
-    labPostChecks(attempt);
+    labState.pendingChecks.set(attempt, { attempt, collected: false, errors: null, buttonCount: 0, buttons: [], canvas: null, animation: null, structure: null,
+      controlsTested: null, controlsCapped: false, inputFound: null, inputTyped: null, inputValid: null, inputValidationMessage: null, rowCount: null });
+    labPostChecks(runId, attempt);
     render();
   }
 }, 2000);
@@ -530,10 +577,13 @@ document.addEventListener('click', async event => {
       const result = await labApi('/runs', { method: 'POST', body: JSON.stringify({ endpoints, fields: labState.fields }) });
       labState.active = null;
       labState.activeId = '';
-      labState.checksSent.clear();
+      labState.checksSaved.clear();
+      labState.checksTries.clear();
+      labState.checksErrors = {};
       labState.pendingChecks.clear();
       labState.previewState = {};
       labState.previewOpenedAt = {};
+      labState.previewNonce = '';
       location.hash = `#labrun/${result.id}`;
     } catch (error) {
       labState.startError = error.message;
@@ -557,6 +607,21 @@ document.addEventListener('click', async event => {
     return;
   }
 
+  const control = target.closest('[data-lab-pause], [data-lab-resume]');
+  if (control && labState.active) {
+    const action = control.matches('[data-lab-pause]') ? 'pause' : 'resume';
+    const runId = labState.active.id;
+    try {
+      await labApi(`/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST' });
+      if (labState.activeId === runId) labState.active = await labApi('/runs/' + encodeURIComponent(runId));
+      labState.activeError = '';
+    } catch (error) {
+      labState.activeError = error.message;
+    }
+    render();
+    return;
+  }
+
   const preview = target.closest('[data-lab-preview]');
   if (preview && !preview.disabled) {
     const attempt = Number(preview.dataset.labPreview);
@@ -567,9 +632,15 @@ document.addEventListener('click', async event => {
       labState.attempt = attempt;
       if (!labState.previewState[attempt]) labState.previewState[attempt] = 'checking';
       labState.previewOpenedAt[attempt] = Date.now();
-      if (!labState.checksSent.has(attempt)) setTimeout(() => labPostChecks(attempt), 8500);
+      labState.previewNonce = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
     render();
+    return;
+  }
+
+  const retryChecks = target.closest('[data-lab-check-retry]');
+  if (retryChecks && labState.active) {
+    labPostChecks(labState.activeId, labSelectedAttempt());
     return;
   }
 
