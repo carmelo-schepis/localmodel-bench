@@ -2,7 +2,7 @@
 
 A small, self-hosted interface for testing chat models exposed through Ollama's OpenAI-compatible `/v1` endpoint. No model weights or GPU are required in this container.
 
-> **Early release:** the bundled task pack is a smoke-test fixture. Its code prompts are not run in a sandbox, writing requires human review, Artificial Analysis figures are unvalidated published reference data, no statistical confidence intervals are included, and local run scores are not a validated intelligence index. Do not use these results to select safety-critical models.
+> **Early release:** the bundled task pack is a smoke-test fixture. Its code prompts are not run in a sandbox, writing requires human review, Artificial Analysis figures are unvalidated published reference data, no statistical confidence intervals are included, and local run scores are not a validated intelligence index. The Lab tab executes model-built pages only in a sandboxed browser preview and never on the server. Do not use these results to select safety-critical models.
 
 ## Start
 
@@ -27,6 +27,17 @@ Runs execute sequentially per configured endpoint. Requests stream responses and
 Bench setup is also stored locally: endpoints, their model ticks, depth and categories survive a reload, so the model list never resets. Reconnecting an endpoint that is already listed overwrites its entry instead of duplicating it. Every run keeps a copy of its data, browsable per model and category on the Datasets tab. The saved bench at the bottom of Compare keeps the latest data per model across runs; a model benched again overwrites its own entry, and a run that produced no graded answers never overwrites the bench.
 
 The first-release question set deliberately repeats a small smoke-test pool to exercise grading and the UI. Selecting Standard or Rigorous repeats the same tiny pool; those labels indicate request count, not a validated, representative benchmark. Results include no confidence intervals. The hand-built coding responses are checked as text and are not executed; coding scores must not be interpreted as verified executable correctness. Essay results are left ungraded for human review. Endpoint-derived cost, wattage and hardware details are unavailable. Published Artificial Analysis figures appear beside local results and are never mixed into them.
+
+## Lab
+
+The Lab tab is an execution bench: selected models write self-contained HTML documents that run, instead of only answering text questions. Each run asks every chosen model for a product landing page with working buttons, a page with three interactive widgets (counter, temperature slider, picture picker), a playable Snake game, a data dashboard table, and a JSON-only aggregation task.
+
+- **Sandboxed preview:** every artifact is served with `Content-Security-Policy: sandbox allow-scripts`, so it runs in an opaque origin with network requests excluded by the model's prompt and no storage or same-origin access. Previews run inline on the run page and in one sandboxed new tab via "Open full preview". Nothing executes on the server; the server only stores and serves the HTML.
+- **Browser checks:** opening a preview injects a small harness element that waits for the page to load, then clicks every visible button, types into an input if present, tracks uncaught errors and DOM changes, and reports one result to the bench page. Results are stored as auto checks alongside each attempt.
+- **Human review:** the review tape asks for visuals on a 1–5 scale, whether buttons actually work, and whether the game is playable. Review answers and auto checks both survive reloads with the run.
+- **Rollup:** finished runs summarize per endpoint, model and field (UI, coding, extras), separating the automatic browser checks from human review scores; models never inherit each other's numbers.
+
+The harness is a heuristic smoke test, not a verdict on code quality, and the sandbox is a browser containment boundary, not a guarantee about the content. Model-generated pages are untrusted output; close the preview if a page misbehaves.
 
 ## Development
 

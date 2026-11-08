@@ -451,6 +451,11 @@ async def refresh_once(api_key: str) -> None:
                                        'next_due': now + (retry or AA_INTERVAL)})])
         aa_log.warning('AA refresh did not complete: %s', err)
 
+# The execution lab imports this module for shared helpers, so it is loaded
+# here, after every name it needs exists. Attribute access on `lab` only
+# happens at request time and in the lifespan below.
+from . import lab  # noqa: E402
+
 async def aa_loop(api_key: str) -> None:
     # Due times are stored, so a restart does not spend quota on an early fetch.
     while True:
@@ -470,7 +475,9 @@ async def aa_loop(api_key: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
+    lab.initialize()
     app.state.tasks = set()
+    app.include_router(lab.router)
     if AA_KEY:
         task = asyncio.create_task(aa_loop(AA_KEY)); app.state.tasks.add(task); task.add_done_callback(app.state.tasks.discard)
     else:

@@ -431,14 +431,69 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 .chart-empty { margin: 0; padding: 24px var(--gutter); color: var(--ink-2); }
 .chart-warn { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
 
+/* Lab */
+main[data-layout="lab"] { display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 28vw, 440px); }
+main[data-layout="lab"] .part-history { grid-column: 1 / -1; }
+main[data-layout="labrun"] { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+main[data-layout="labrun"] .part-head, main[data-layout="labrun"] .part-inspect { min-width: 0; }
+main[data-layout="labrun"] .part-tape, main[data-layout="labrun"] .part-head { grid-column: 1 / -1; }
+main[data-layout="labrun"] .part-rollup { grid-column: 2; grid-row: 3; border-left: 1px solid var(--line); }
+
+.lab-task-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+.lab-task-list li small { color: var(--ink-3); font-size: 12px; }
+.lab-history { border-top: 1px solid var(--line); margin-top: 32px; }
+.lab-history .block-head { padding-top: 28px; }
+.lab-row-open { padding: 0; background: none; border: 0; cursor: pointer; font: inherit; }
+
+.lab-checks { display: grid; gap: 8px; margin-top: 12px; }
+.lab-check {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.lab-check small { color: var(--ink-3); font-size: 12px; text-align: right; }
+.lab-check::before { content: "–"; flex: none; font-weight: 600; }
+.lab-check.is-pass::before { content: "✓"; }
+.lab-check.is-fail::before { content: "✕"; color: var(--signal); }
+.lab-check.is-skip small { font-style: italic; }
+
+.lab-review { display: grid; gap: 10px; margin-top: 4px; }
+.lab-review-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.lab-review-row > span { min-width: 64px; color: var(--ink-2); font-size: 13px; }
+.lab-review-row small { color: var(--ink-3); font-size: 12px; }
+.lab-rate-set { display: flex; flex-wrap: wrap; gap: 8px; }
+.lab-rate.is-on { background: var(--ink); color: var(--black); border-color: var(--ink); }
+.lab-rate.is-on:hover { background: #d9d9d9; }
+
+.lab-preview { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.lab-preview-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; color: var(--ink-3); font-size: 13px; }
+.lab-preview-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.lab-preview iframe {
+  width: 100%;
+  height: 440px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: #fff;
+}
+.lab-prompt { margin-top: 16px; }
+.lab-prompt summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.lab-prompt pre { max-width: 72ch; max-height: 30vh; margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; overflow: auto; color: var(--ink-2); font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word; }
+.block-head.small { padding: 22px 0 8px; }
+.block-head.small h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.warning { margin-top: 12px; color: var(--ink-2); font-size: 13px; }
+
 /* Narrower screens */
 @media (max-width: 1320px) {
-  main[data-layout="run"] { display: flex; flex-direction: column; }
-  .part-inspect { border-left: 0; border-top: 1px solid var(--line); }
+  main[data-layout="run"], main[data-layout="labrun"] { display: flex; flex-direction: column; }
+  .part-inspect, main[data-layout="labrun"] .part-rollup { border-left: 0; border-top: 1px solid var(--line); }
 }
 
 @media (max-width: 900px) {
-  main[data-layout="bench"] { display: flex; flex-direction: column; }
+  main[data-layout="bench"], main[data-layout="lab"] { display: flex; flex-direction: column; }
   .pane, .pane.compact { min-height: 0; padding-bottom: 32px; }
   .part-sheet { position: static; height: auto; overflow: visible; border-left: 0; border-top: 1px solid var(--line); }
   .connect { grid-template-columns: minmax(0, 1fr); gap: 16px; }
