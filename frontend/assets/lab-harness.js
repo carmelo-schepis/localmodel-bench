@@ -3,9 +3,11 @@
 (function () {
   'use strict';
   var params = new URLSearchParams(location.search);
+  var scriptParams = new URLSearchParams(document.currentScript ? new URL(document.currentScript.src, location.href).search : '');
   var result = {
-    source: 'lab-harness', runId: params.get('labRun'), attempt: Number(params.get('attempt')),
-    nonce: params.get('nonce'), collected: true, errors: 0, canvas: false,
+    source: 'lab-harness', runId: params.get('labRun') || scriptParams.get('labRun'),
+    attempt: Number(params.get('attempt') || scriptParams.get('attempt')),
+    nonce: params.get('nonce') || scriptParams.get('nonce'), collected: true, errors: 0, canvas: false,
     structure: null, animation: null, buttonCount: 0, controlsTotal: 0,
     controlsTested: 0, controlsCapped: false, buttons: [], inputFound: null,
     inputTyped: null, inputValid: null, inputValidationMessage: null, rowCount: null,

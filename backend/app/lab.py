@@ -321,8 +321,9 @@ def serialize_lab_run(run_id: str) -> dict:
         item = attempt_row(row)
         if row['field'] == 'extras':
             item['autoScore'] = item['auto'].get('score') if isinstance(item['auto'].get('score'), (int, float)) else None
-            item['autoChecks'] = [{'name': 'Deterministic schema check', 'pass': item['autoScore'] is not None and item['autoScore'] > 0,
-                                   'detail': 'score stored at generation time'}]
+            item['autoChecks'] = [{'name': 'Deterministic schema check',
+                                   'pass': (item['autoScore'] > 0) if item['autoScore'] is not None else None,
+                                   'detail': 'score stored at generation time' if item['autoScore'] is not None else 'not measured: no usable model response'}]
         else:
             item['autoScore'] = auto_score(item['auto'], row['task'])
             item['autoChecks'] = auto_checks(item['auto'], row['task'])

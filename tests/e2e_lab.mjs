@@ -21,7 +21,6 @@ const assert = (condition, message) => {
   report.assertions.push(message);
 };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-const source = fs.readFileSync(new URL('./../frontend/assets/lab-harness.js', import.meta.url), 'utf8');
 let context;
 
 async function api(page, route, init) {
@@ -38,23 +37,25 @@ async function harnessFixtures(page) {
     { name: 'early script exception', head: '<script>throw new Error("fixture early")</script>', body: '<p>page</p>', check: r => r.errors >= 1 },
     { name: 'static canvas', body: '<canvas width="40" height="40"></canvas>', check: r => r.canvas === true && r.animation === false },
     { name: 'animated canvas', body: '<canvas id="c" width="40" height="40"></canvas><script>const c=document.querySelector("#c"),x=c.getContext("2d");function tick(t){x.clearRect(0,0,40,40);x.fillRect(t%30,0,10,10);requestAnimationFrame(tick)}requestAnimationFrame(tick)</script>', check: r => r.canvas === true && r.animation === true },
-    { name: 'link does not navigate', body: '<a id="link" href="https://example.com">go</a><p id="done"></p><script>document.querySelector("#link").onclick=()=>document.querySelector("#done").textContent="clicked"</script>', check: (r, pageUrl) => r.buttons[0]?.changedDom === true && pageUrl.includes('/#lab') },
+    { name: 'link does not navigate', body: '<a id="link" href="https://example.com">go</a><p id="done"></p><script>document.querySelector("#link").onclick=()=>document.querySelector("#done").textContent="clicked"</script>', check: (r, frameUrl) => r.buttons[0]?.changedDom === true && !frameUrl.includes('example.com') },
     { name: 'input validity', body: '<input id="email" required type="email">', check: r => r.inputFound === true && r.inputValid === false && Boolean(r.inputValidationMessage) },
     { name: 'incorrect dashboard rows', body: '<table><tbody><tr><td>one</td></tr><tr><td>two</td></tr></tbody></table>', check: r => r.rowCount === 2 },
   ];
   for (const item of cases) {
     const token = `fixture-${item.name.replace(/\W/g, '-')}`;
-    await page.evaluate(token => {
-      history.replaceState({}, '', `/#lab?labRun=${encodeURIComponent(token)}&attempt=1&nonce=${encodeURIComponent(token)}`);
-      window.__labFixtureResults = [];
-      window.addEventListener('message', event => { if (event.data?.source === 'lab-harness') window.__labFixtureResults.push(event.data); });
-    }, token);
-    const head = item.head || '';
-    await page.setContent(`<!doctype html><html><head>${head}<script>${source}</script></head><body>${item.body}</body></html>`, { waitUntil: 'load' });
-    await page.waitForFunction(() => window.__labFixtureResults?.length > 0, { timeout: 9000 });
+    const beforeErrors = report.consoleErrors.length;
+    await page.setContent(`<!doctype html><html><body><script>window.__labFixtureResults=[];addEventListener('message',event=>{if(event.data?.source==='lab-harness')window.__labFixtureResults.push(event.data)})</script><iframe id="lab-fixture" sandbox="allow-scripts"></iframe></body></html>`, { waitUntil: 'load' });
+    const harnessUrl = `${base}/assets/lab-harness.js?labRun=${encodeURIComponent(token)}&attempt=1&nonce=${encodeURIComponent(token)}`;
+    const doc = `<!doctype html><html><head><script src="${harnessUrl}"></script>${item.head || ''}</head><body>${item.body}</body></html>`;
+    await page.locator('#lab-fixture').evaluate((frame, html) => { frame.srcdoc = html; }, doc);
+    await page.waitForFunction(() => window.__labFixtureResults?.length > 0, null, { timeout: 9000 });
     const result = await page.evaluate(() => window.__labFixtureResults.at(-1));
-    const passes = item.check(result, page.url());
-    report.fixtureResults.push({ name: item.name, passes, result });
+    const passes = result.runId === token && result.nonce === token && item.check(result, page.frames().at(-1)?.url());
+    await page.waitForTimeout(300);
+    const oneMessage = await page.evaluate(() => window.__labFixtureResults.length === 1);
+    assert(oneMessage, `harness fixture: ${item.name} reports once`);
+    const fixtureErrors = report.consoleErrors.splice(beforeErrors);
+    report.fixtureResults.push({ name: item.name, passes, frameUrl: page.frames().at(-1)?.url(), errors: fixtureErrors, result });
     assert(passes, `harness fixture: ${item.name}`);
   }
 }
@@ -101,6 +102,11 @@ async function waitForRun(page, runId, timeoutMs) {
 async function inspectArtifact(page, run, attempt) {
   await page.locator(`[data-lab-select="${attempt}"]`).click();
   const previewButton = page.locator(`.part-inspect [data-lab-preview="${attempt}"]`).first();
+  const frameNavigations = [];
+  const onFrameNavigated = frame => {
+    if (frame.url().includes(`/api/lab/runs/${run.id}/artifacts/${attempt}`)) frameNavigations.push(frame.url());
+  };
+  page.on('framenavigated', onFrameNavigated);
   await previewButton.click();
   const frameSelector = `iframe[data-lab-frame="${attempt}"]`;
   await page.locator(frameSelector).waitFor({ state: 'attached', timeout: 10000 });
@@ -116,7 +122,7 @@ async function inspectArtifact(page, run, attempt) {
   const rawResponse = await page.request.get(`${base}/api/lab/artifacts/${run.id}/${attempt}/raw`);
   const rawHtml = await rawResponse.text();
   assert(rawResponse.status() === 200 && !rawHtml.includes('lab-harness.js') && rawHtml === storedPreviewHtml, `attempt ${attempt} raw preview excludes harness and matches stored body`);
-  await page.evaluate(() => { window.__labFrame = document.querySelector('iframe[data-lab-frame]'); window.__labFrameTime = window.__labFrame.contentWindow.performance.timeOrigin; });
+  const settledFrameNavigations = frameNavigations.length;
   await page.waitForFunction(attempt => {
     const row = [...document.querySelectorAll('.lab-tape tr')].find(node => node.querySelector(`[data-lab-select="${attempt}"]`));
     return row && row.textContent;
@@ -132,8 +138,9 @@ async function inspectArtifact(page, run, attempt) {
   await popup.waitForLoadState('domcontentloaded');
   assert(!await popup.locator('script[src*="lab-harness"]').count(), `attempt ${attempt} full preview is raw`);
   await popup.close();
-  const sameFrame = await page.evaluate(() => document.querySelector('iframe[data-lab-frame]') === window.__labFrame && document.querySelector('iframe[data-lab-frame]').contentWindow.performance.timeOrigin === window.__labFrameTime);
+  const sameFrame = await page.locator(frameSelector).evaluate((node, expectedSrc) => node.isConnected && node.src === expectedSrc, iframeAttrs.src) && frameNavigations.length === settledFrameNavigations;
   assert(sameFrame, `attempt ${attempt} iframe survives refresh/check updates`);
+  page.off('framenavigated', onFrameNavigated);
   return reportAttempt;
 }
 
@@ -161,6 +168,9 @@ async function main() {
     assert(await page.locator('[data-nav="lab"]').getAttribute('aria-current') === 'page', 'Lab navigation is highlighted');
     await page.screenshot({ path: path.join(output, 'lab-desktop.png'), fullPage: true });
     await harnessFixtures(page);
+    // setContent replaces the document but keeps its URL. Force a full load so
+    // the app scripts are evaluated again before testing the application routes.
+    await page.goto(`${base}/?lab-e2e=${Date.now()}#lab`, { waitUntil: 'domcontentloaded' });
 
     // Existing pages remain routable and display without app-level JS errors.
     for (const route of ['bench', 'runs', 'datasets', 'compare', 'lab']) {
@@ -202,7 +212,7 @@ async function main() {
     await page.locator('[data-lab-model]').first().waitFor({ state: 'attached', timeout: 15000 });
     const labModel = page.locator(`input[data-lab-model][value="${modelId}"]`);
     await labModel.check();
-    const extras = page.locator('[data-lab-field="extras"]');
+    const extras = page.locator('input[data-lab-field][value="extras"]');
     await extras.uncheck();
     assert((await page.locator('.sheet-foot .tally').innerText()).includes('4 attempts'), 'field toggle reduces tally to four');
     await extras.check();
@@ -287,7 +297,8 @@ async function main() {
     await page.request.put(`${base}/api/bench/setup`, { data: savedBench }).catch(() => {});
     await page.request.put(`${base}/api/lab/setup`, { data: savedLab }).catch(() => {});
     report.finishedAt = new Date().toISOString();
-    report.consoleErrors = report.consoleErrors.filter(message => !message.includes('fixture'));
+    report.expectedAbortRequests = report.failedRequests.filter(item => item.url.includes('/api/lab/runs/') && item.url.endsWith('/events') && item.error === 'net::ERR_ABORTED');
+    report.failedRequests = report.failedRequests.filter(item => !report.expectedAbortRequests.includes(item));
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
     await context.close();
     fs.rmSync(profile, { recursive: true, force: true });

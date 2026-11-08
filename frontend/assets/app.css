@@ -503,9 +503,10 @@ main[data-layout="labrun"] .part-rollup { grid-column: 2; grid-row: 4; border-le
 
 @media (max-width: 640px) {
   .topbar { gap: 12px; }
+  .brand { font-size: 13px; letter-spacing: -.02em; }
   .connection { display: none; }
   .topbar nav { margin-left: auto; gap: 0; }
-  .topbar nav a { padding: 0 8px; }
+  .topbar nav a { padding: 0 4px; font-size: 12px; }
   .lane { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
   .ticks { grid-column: 1 / -1; grid-row: 2; height: 40px; }
   .run-table .col-depth { display: none; }
