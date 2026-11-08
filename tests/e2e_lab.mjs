@@ -104,6 +104,7 @@ async function waitForRun(page, runId, timeoutMs) {
 async function inspectArtifact(page, run, attempt) {
   await page.locator(`[data-lab-select="${attempt}"]`).click();
   const previewButton = page.locator(`.part-inspect [data-lab-preview="${attempt}"]`).first();
+  assert(await page.locator(`iframe[data-lab-frame="${attempt}"]`).count() === 0, `attempt ${attempt} preview is lazy before opening`);
   const frameNavigations = [];
   const onFrameNavigated = frame => {
     if (frame.url().includes(`/api/lab/runs/${run.id}/artifacts/${attempt}`)) frameNavigations.push(frame.url());
@@ -172,6 +173,8 @@ async function inspectArtifact(page, run, attempt) {
   const sameFrame = await page.locator(frameSelector).evaluate((node, expectedSrc) => node.isConnected && node.src === expectedSrc, iframeAttrs.src) && frameNavigations.length === settledFrameNavigations;
   assert(sameFrame, `attempt ${attempt} iframe survives refresh/check updates`);
   page.off('framenavigated', onFrameNavigated);
+  await page.locator(`[data-lab-preview="${attempt}"]`).last().click();
+  assert(await page.locator(frameSelector).count() === 0, `attempt ${attempt} preview closes without leaving an iframe`);
   return reportAttempt;
 }
 
