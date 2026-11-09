@@ -81,11 +81,29 @@ class ErrorTests(unittest.TestCase):
 
 class GradingTests(unittest.TestCase):
     def test_smoke_task_answers(self):
-        self.assertEqual(main.grade('Engineering', '20 volts', '20', 'number')[0], 1)
+        self.assertEqual(main.grade('Engineering', '20', '20', 'number')[0], 1)
         self.assertEqual(main.grade('Logic', 'Cy.', 'Cy', 'text')[0], 1)
         self.assertEqual(main.grade('Instructions', '{"ready": true}', '{"ready":true}', 'json')[0], 1)
         self.assertEqual(main.grade('Engineering', '21', '20', 'number')[0], 0)
         self.assertIsNone(main.grade('Writing', 'Some text', 'rubric', 'essay')[0])
+
+    def test_limited_static_code_grading(self):
+        for code in ('def solve():\n    return 2', 'def solve():\n    return 1 + 1', 'def solve():\n    return sum([3, 5])'):
+            answer = '8' if 'sum' in code else '2'
+            self.assertEqual(main.grade('Coding', code, answer, 'code'), (1.0, None))
+        for code in ('def solve():\n    return 2 + 99', '# return 2\ndef solve():\n    return 4', 'def solve():\n    return "2"', 'def solve():\n    x = 2'):
+            score, reason = main.grade('Coding', code, '2', 'code')
+            self.assertIn(score, (0.0, None)); self.assertTrue(reason)
+        for code in ('def solve(:', 'import os\ndef solve():\n    return 2', 'def solve():\n    while True: pass'):
+            self.assertIsNotNone(main.grade('Coding', code, '2', 'code')[1])
+
+    def test_task_specific_strictness(self):
+        self.assertEqual(main.grade('Instructions', 'Blue', 'blue', 'text')[0], 0)
+        self.assertEqual(main.grade('Instructions', 'blue!', 'blue', 'text')[0], 0)
+        self.assertEqual(main.grade('Instructions', '{"ready":1}', '{"ready":true}', 'json')[0], 0)
+        self.assertEqual(main.grade('Instructions', '{"ready":true,"x":1}', '{"ready":true}', 'json')[0], 0)
+        self.assertEqual(main.grade('Engineering', '2e1', '20', 'number')[0], 1)
+        self.assertEqual(main.grade('Engineering', '20 volts (21)', '20', 'number')[0], 0)
 
     def test_endpoint_requires_v1_and_rejects_credentials(self):
         self.assertEqual(main.Endpoint.validate_url('http://modelbox:11434/v1/'), 'http://modelbox:11434/v1')
@@ -121,6 +139,31 @@ class RunSelectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_legacy_run_is_labeled_and_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            config={'models':[{'endpoint':'one','model':'m'}], 'endpoints':[], 'categories':main.CATEGORIES}
+            with main.connect_db() as db:
+                db.execute("INSERT INTO runs(id,created,depth,state,config) VALUES(?,?,?,?,?)", ('legacy','today','Quick','completed',json.dumps(config)))
+                db.execute("INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status) VALUES(?,?,?,?,?,?,?,?,?,?)", ('legacy','one','m','Knowledge','?','3',1,.1,1,'ok'))
+            result=main.serialize_run('legacy')
+            self.assertEqual(result['grader_version'], 'legacy')
+            self.assertEqual(result['results'][0]['response'], '3')
+            self.assertEqual(result['results'][0]['score'], 1)
+
+    def test_incomplete_and_ungraded_attempts_do_not_complete_composite(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
+            main.initialize()
+            config={'models':[{'endpoint':'one','model':'m'}], 'endpoints':[], 'categories':main.CATEGORIES}
+            with main.connect_db() as db:
+                db.execute("INSERT INTO runs(id,created,depth,state,config,progress,total) VALUES(?,?,?,?,?,?,?)", ('mix','today','Quick','completed',json.dumps(config),3,3))
+                for category,score,status in [('Coding',None,'ok'),('Engineering',1,'ok'),('Logic',None,'incomplete')]:
+                    db.execute("INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status) VALUES(?,?,?,?,?,?,?,?,?,?)", ('mix','one','m',category,'?','partial',score,.1,None,status))
+            result=main.serialize_run('mix')
+            self.assertEqual(result['composites'], {})
+            coding=next(row for row in result['summary'] if row['category']=='Coding')
+            self.assertEqual((coding['coverage'],coding['ungraded']), (0,1))
+
     def test_partial_run_never_gets_composite(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(main, 'DB_PATH', Path(temporary) / 'test.db'):
             main.initialize()

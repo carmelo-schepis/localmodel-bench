@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import math
@@ -186,29 +187,130 @@ async def models_for(url: str) -> list[dict[str, Any]]:
             models.append({'id': item['id'], 'owned_by': item.get('owned_by', 'unknown')})
         return models
 
-def normalized(text: str) -> str:
-    return re.sub(r'\s+', '', text).lower()
+GRADER_VERSION = '2'
+TASK_POLICY_VERSION = '1'
+
+class UnsupportedCode(ValueError):
+    """Valid Python outside the bounded smoke-test interpreter."""
+
+
+def _code_result(source: str) -> Any:
+    """Limited static evaluation only; never invokes generated Python."""
+    source = source.strip()
+    if len(source) > 4096:
+        raise UnsupportedCode('Source exceeds the 4096-character limit.')
+    if source.startswith('```'):
+        match = re.fullmatch(r'```(?:python)?[ \t]*\n(.*?)\n?```', source, re.S | re.I)
+        if not match:
+            raise SyntaxError('Expected one Python fence with no surrounding prose.')
+        source = match.group(1).strip()
+    tree = ast.parse(source)
+    nodes = list(ast.walk(tree))
+    if len(nodes) > 128:
+        raise UnsupportedCode('Program exceeds the 128-node AST limit.')
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'solve']
+    if len(funcs) != 1:
+        raise SyntaxError('Expected exactly one top-level solve() function.')
+    func = funcs[0]
+    args = func.args
+    if len(tree.body) != 1 or func.decorator_list or func.returns or any((args.posonlyargs, args.args, args.vararg, args.kwonlyargs, args.kw_defaults, args.kwarg, args.defaults)):
+        raise UnsupportedCode('Only an undecorated solve() with no arguments or annotations is supported.')
+    allowed = (ast.Module, ast.FunctionDef, ast.arguments, ast.Return, ast.Assign,
+               ast.Name, ast.Load, ast.Store, ast.Constant, ast.Expr, ast.List,
+               ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div,
+               ast.USub, ast.UAdd, ast.Call)
+    if any(not isinstance(node, allowed) for node in nodes):
+        raise UnsupportedCode('Program uses unsupported Python syntax.')
+    if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == 'sum' for node in nodes):
+        raise UnsupportedCode('Assignments to the supported built-in sum are not supported.')
+    env: dict[str, Any] = {}
+    operations = 0
+
+    def bounded(value):
+        if type(value) in (int, float) and (not math.isfinite(value) or abs(value) > 10**12):
+            raise UnsupportedCode('Numeric magnitude exceeds the evaluator limit.')
+        return value
+
+    def evaluate(node):
+        nonlocal operations
+        operations += 1
+        if operations > 128:
+            raise UnsupportedCode('Operation count exceeds the evaluator limit.')
+        if isinstance(node, ast.Constant):
+            return bounded(node.value)
+        if isinstance(node, ast.Name) and node.id in env:
+            return env[node.id]
+        if isinstance(node, ast.List):
+            return [evaluate(item) for item in node.elts]
+        if isinstance(node, ast.UnaryOp):
+            value = evaluate(node.operand)
+            if type(value) not in (int, float): raise UnsupportedCode('Arithmetic requires numeric operands.')
+            return bounded(-value if isinstance(node.op, ast.USub) else +value)
+        if isinstance(node, ast.BinOp):
+            left, right = evaluate(node.left), evaluate(node.right)
+            if type(left) not in (int, float) or type(right) not in (int, float):
+                raise UnsupportedCode('Arithmetic requires numeric operands.')
+            if isinstance(node.op, ast.Add): value = left + right
+            elif isinstance(node.op, ast.Sub): value = left - right
+            elif isinstance(node.op, ast.Mult): value = left * right
+            else: value = left / right
+            return bounded(value)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'sum' and 'sum' not in env and len(node.args) == 1 and not node.keywords:
+            values = evaluate(node.args[0])
+            if not isinstance(values, list) or any(type(x) not in (int, float) for x in values):
+                raise UnsupportedCode('sum requires one numeric list.')
+            return bounded(sum(values))
+        raise UnsupportedCode('Expression is unsupported by limited static evaluation.')
+
+    for index, stmt in enumerate(func.body):
+        if index == 0 and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            env[stmt.targets[0].id] = evaluate(stmt.value)
+        elif isinstance(stmt, ast.Return):
+            return evaluate(stmt.value) if stmt.value else None
+        else:
+            raise UnsupportedCode('Statement is unsupported by limited static evaluation.')
+    return None
 
 def grade(category: str, text: str, answer: str, mode: str) -> tuple[float | None, str | None]:
     if mode == 'essay':
         return None, 'Requires blinded human rubric review. Automatic essay scores are not enabled.'
     candidate = text.strip()
     if mode == 'code':
-        match = re.search(r'(?m)^\s*(?:return\s+)?(-?\d+)\s*$', candidate)
-        if not match:
-            match = re.search(r"return\s+['\"]?(-?\d+)['\"]?", candidate)
-        score = 1.0 if match and match.group(1) == answer else 0.0
+        try:
+            value = _code_result(candidate)
+        except UnsupportedCode as err:
+            return None, f'Limited static evaluation: {err}'
+        except (SyntaxError, ZeroDivisionError) as err:
+            return 0.0, f'Invalid solve() program: {err}'
+        score = float(type(value) in (int, float) and value == float(answer))
+        return score, None if score else f'solve() returned {value!r}; expected {answer}.'
     elif mode == 'json':
         try:
-            score = 1.0 if json.loads(candidate.split('```')[-1].split('```')[0].strip()) == {"ready": True} else 0.0
-        except (ValueError, TypeError):
-            score = 0.0
+            def pairs(items):
+                result = {}
+                for k,v in items:
+                    if k in result: raise ValueError('duplicate key')
+                    result[k]=v
+                return result
+            def reject_constant(value):
+                raise ValueError(f'Invalid JSON constant {value}')
+            parsed = json.loads(candidate, object_pairs_hook=pairs, parse_constant=reject_constant)
+            expected = json.loads(answer)
+            if not isinstance(parsed, dict) or set(parsed) != set(expected): return 0.0, 'JSON must be an exact object with no extra or missing fields.'
+            if json.dumps(parsed, sort_keys=True) != json.dumps(expected, sort_keys=True): return 0.0, 'JSON values or types do not match the required object.'
+            return 1.0, None
+        except (ValueError, TypeError): return 0.0, 'Answer is not valid JSON (or contains a duplicate key).'
     elif mode == 'number':
-        match = re.search(r'-?\d+(?:\.\d+)?', candidate)
-        score = 1.0 if match and math.isclose(float(match.group()), float(answer), rel_tol=1e-6, abs_tol=1e-6) else 0.0
+        if not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', candidate): return 0.0, 'Return one number only; prose and extra numbers are not allowed.'
+        score = 1.0 if math.isclose(float(candidate), float(answer), rel_tol=1e-6, abs_tol=1e-6) else 0.0
+        return score, None if score else f'Expected {answer}; received {candidate}.'
     else:
-        score = 1.0 if normalized(candidate.strip(' .!`"')) == normalized(answer) else 0.0
-    return score, None
+        if category == 'Instructions':
+            ok = candidate == answer and bool(re.fullmatch(r'[a-z]+', candidate))
+        else: ok = candidate.strip().rstrip('.') == answer
+        return (1.0 if ok else 0.0), (None if ok else f'Expected {answer!r} in the requested format.')
 
 def rollup_results(config: dict, run_state: str, progress: int, total: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-model, per-category rollup shared by the run view, Datasets and the saved bench."""
@@ -225,14 +327,14 @@ def rollup_results(config: dict, run_state: str, progress: int, total: int, rows
         items = grouped.get((endpoint, model_id), [])
         for category in CATEGORIES:
             relevant = [r for r in items if r['category'] == category]
-            graded = [r for r in relevant if r['score'] is not None]
+            graded = [r for r in relevant if r['score'] is not None and r['status'] == 'ok']
             summary.append({'endpoint': endpoint, 'model': model_id, 'category': category,
                 'score': round(sum(r['score'] for r in graded) / len(graded) * 100, 1) if graded else None,
                 'coverage': len(graded), 'total': len(relevant),
                 'elapsed': round(sum(r['elapsed'] or 0 for r in relevant), 2),
                 'tokens': sum(r['tokens'] or 0 for r in relevant),
-                'ungraded': sum(1 for r in relevant if r['score'] is None)})
-    complete = run_state == 'completed' and progress == total and all(
+                'ungraded': len(relevant) - len(graded)})
+    complete = run_state == 'completed' and progress == total and bool(models) and all(r['status'] == 'ok' for r in rows) and all(
         sum(1 for x in summary if x['endpoint'] == e['endpoint'] and x['model'] == e['model'] and x['category'] != 'Writing' and x['coverage'] == x['total'] and x['total']) == 6
         for e in models)
     composites = {}
@@ -259,6 +361,8 @@ def serialize_run(run_id: str) -> dict[str, Any]:
             'progress': run['progress'], 'total': run['total'], 'models': rollup['models'],
             'categories': rollup['categories'], 'results': rows, 'summary': rollup['summary'],
             'composites': rollup['composites'], 'complete': rollup['complete'],
+            'grader_version': json.loads(run['config']).get('grader_version', 'legacy'),
+            'task_policy_version': json.loads(run['config']).get('task_policy_version', 'legacy'),
             'events': data.get('events', [])[-20:], 'error': run['error']}
 
 def publish_to_bench(run_id: str) -> None:
@@ -316,11 +420,67 @@ def read_datasets() -> list[dict[str, Any]]:
                              'composites': rollup['composites'], 'complete': rollup['complete'], 'errors': rollup['errors']})
     return datasets
 
+async def read_completion(response: httpx.Response, evidence: dict[str, Any]) -> None:
+    """Keep partial final/reasoning content and optional termination evidence."""
+    async for line in response.aiter_lines():
+        if not line.startswith('data:'):
+            continue
+        payload = line[5:].strip()
+        if not payload:
+            continue
+        if payload == '[DONE]':
+            evidence['done'] = True
+            break
+        try:
+            chunk = json.loads(payload)
+            if not isinstance(chunk, dict) or 'error' in chunk:
+                raise ValueError('Expected a completion object.')
+            choices = chunk.get('choices', [])
+            if not isinstance(choices, list): raise ValueError('Invalid choices.')
+            for choice in choices:
+                if not isinstance(choice, dict): raise ValueError('Invalid choice.')
+                if choice.get('index', 0) != 0: continue
+                delta = choice.get('delta', {})
+                if not isinstance(delta, dict): raise ValueError('Invalid delta.')
+                for field, target in [('content', 'content'), ('reasoning_content', 'reasoning'), ('reasoning', 'reasoning')]:
+                    value = delta.get(field)
+                    if value is not None and not isinstance(value, str): raise ValueError('Invalid text delta.')
+                    if value: evidence[target] += value
+                finish = choice.get('finish_reason')
+                if finish is not None:
+                    if not isinstance(finish, str): raise ValueError('Invalid finish reason.')
+                    evidence['finish_reason'] = finish
+            usage = chunk.get('usage')
+            if isinstance(usage, dict) and type(usage.get('completion_tokens')) is int:
+                evidence['tokens'] = usage['completion_tokens']
+            if len(evidence['content']) + len(evidence['reasoning']) > 100_000:
+                raise ValueError('Response exceeded 100 KB limit.')
+            evidence['chunks'] += 1
+        except (ValueError, TypeError) as err:
+            raise ValueError(f'Malformed completion stream: {err}') from err
+
+
+def completion_outcome(evidence: dict[str, Any]) -> tuple[str, str | None]:
+    if not evidence['chunks']:
+        return 'error', 'Malformed completion stream: no completion chunks received.'
+    finish = evidence['finish_reason']
+    if finish in ('length', 'max_tokens'):
+        return 'incomplete', 'Completion stopped at the token limit; partial output was not graded.'
+    if finish and finish != 'stop':
+        return 'incomplete', f'Completion ended with {finish!r}; no normally completed final answer.'
+    if not evidence['content'].strip():
+        return 'incomplete', 'No final answer content was returned.'
+    return 'ok', None
+
 async def execute_run(run_id: str) -> None:
     with connect_db() as db:
         run = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
     if not run: return
     config = json.loads(run['config'])
+    if config.get('grader_version') != GRADER_VERSION or config.get('task_policy_version') != TASK_POLICY_VERSION:
+        with connect_db() as db:
+            db.execute("UPDATE runs SET state='interrupted',error=? WHERE id=?", ('Cannot resume this run with a different grader or task policy. Start a new run.', run_id))
+        return
     tasks = [t for t in SAMPLE_QUESTIONS if t[0] in config['categories']]
     count, repeats, writing_count = DEPTHS[run['depth']]
     rng_seed = int(uuid.UUID(run_id))
@@ -338,7 +498,7 @@ async def execute_run(run_id: str) -> None:
             planned.extend(chosen)
     total = len(planned) * sum(len(endpoint['models']) for endpoint in config['endpoints']) * repeats
     with connect_db() as db:
-        db.execute("UPDATE runs SET state='running',total=?,progress=0 WHERE id=?", (total, run_id))
+        db.execute("UPDATE runs SET state='running',total=? WHERE id=?", (total, run_id))
     with connect_db() as db:
         progress = db.execute('SELECT progress FROM runs WHERE id=?', (run_id,)).fetchone()['progress']
     attempt_index = 0
@@ -358,42 +518,36 @@ async def execute_run(run_id: str) -> None:
                         continue
                     category, prompt, answer, mode, _name = question
                     started = time.monotonic()
-                    content = None; score = None; reason = None; tokens = None; status = 'error'
+                    content = ''; score = None; reason = None; tokens = None; status = 'error'
+                    evidence = {'content': '', 'reasoning': '', 'finish_reason': None, 'tokens': None, 'chunks': 0, 'done': False}
                     try:
                         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=240, write=20, pool=5), follow_redirects=False) as client:
-                            response = await client.post(endpoint['url'] + '/chat/completions', json={
+                            async with client.stream('POST', endpoint['url'] + '/chat/completions', json={
                                 'model': model, 'messages': [{'role': 'user', 'content': prompt}],
                                 'temperature': 0, 'seed': repetition, 'max_tokens': 384, 'stream': True,
-                                'stream_options': {'include_usage': True}})
-                            response.raise_for_status()
-                            content = ''; first_token_at = None
-                            async for line in response.aiter_lines():
-                                if not line.startswith('data:'): continue
-                                payload = line[5:].strip()
-                                if not payload or payload == '[DONE]': continue
-                                chunk = json.loads(payload)
-                                usage = chunk.get('usage')
-                                if usage and isinstance(usage.get('completion_tokens'), int): tokens = usage['completion_tokens']
-                                for choice in chunk.get('choices', []):
-                                    delta = choice.get('delta', {}) or {}
-                                    text = delta.get('content')
-                                    if isinstance(text, str) and text:
-                                        first_token_at = first_token_at or time.monotonic()
-                                        content += text
-                                        if len(content) > 100_000: raise ValueError('Response exceeded 100 KB limit.')
-                        elapsed = time.monotonic() - started
-                        if mode != 'essay': score, reason = grade(category, content or '', answer, mode)
-                        status = 'ok'
+                                'stream_options': {'include_usage': True}}) as response:
+                                if response.is_error: await response.aread()
+                                response.raise_for_status()
+                                await read_completion(response, evidence)
+                        status, reason = completion_outcome(evidence)
+                        if status == 'ok':
+                            score, reason = grade(category, evidence['content'], answer, mode)
                     except Exception as err:
-                        elapsed = time.monotonic() - started
                         reason = safe_error(err)
                         status = 'error'
-                        content = content or ''
+                    elapsed = time.monotonic() - started
+                    content = evidence['content']
+                    if not content.strip() and evidence['reasoning']:
+                        content = '[Reasoning only; no final answer was provided.]\n' + evidence['reasoning']
+                    tokens = evidence['tokens']
                     progress += 1
                     with connect_db() as db:
                         db.execute('INSERT INTO results(run_id,endpoint,model,category,question,response,score,elapsed,tokens,status,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                    (run_id, endpoint['name'], model, category, prompt, content, score, elapsed, tokens, status, reason))
-                        db.execute('UPDATE runs SET progress=? WHERE id=?', (progress, run_id))
+                        data = json.loads(db.execute('SELECT data FROM runs WHERE id=?', (run_id,)).fetchone()['data'])
+                        data.setdefault('completion_evidence', {})[str(attempt_index)] = {
+                            key: evidence[key] for key in ('finish_reason', 'done', 'chunks', 'reasoning')}
+                        db.execute('UPDATE runs SET progress=?,data=? WHERE id=?', (progress, json.dumps(data), run_id))
     with connect_db() as db:
         db.execute("UPDATE runs SET state='completed' WHERE id=?", (run_id,))
     publish_to_bench(run_id)
@@ -513,7 +667,8 @@ async def create_run(payload: RunRequest, request: Request):
         unknown = set(endpoint.models) - known
         if unknown: raise HTTPException(422, f"Model(s) unavailable or do not support chat at {endpoint.name}: {', '.join(sorted(unknown))}")
     run_id = str(uuid.uuid4()); created = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    config = {'endpoints': [e.model_dump() for e in payload.endpoints], 'models': models, 'categories': categories}
+    config = {'endpoints': [e.model_dump() for e in payload.endpoints], 'models': models, 'categories': categories,
+              'grader_version': GRADER_VERSION, 'task_policy_version': TASK_POLICY_VERSION}
     with connect_db() as db:
         db.execute('INSERT INTO runs(id,created,depth,state,config) VALUES(?,?,?,?,?)', (run_id, created, payload.depth, 'queued', json.dumps(config)))
     task = asyncio.create_task(execute_run(run_id)); app.state.tasks.add(task); task.add_done_callback(app.state.tasks.discard)
@@ -551,8 +706,10 @@ async def put_bench_setup(setup: BenchSetup):
 async def control_run(run_id: str, action: str):
     if action not in ('pause','resume','cancel'): raise HTTPException(404,'Unknown run action.')
     with connect_db() as db:
-        run = db.execute('SELECT state FROM runs WHERE id=?',(run_id,)).fetchone()
+        run = db.execute('SELECT state,config FROM runs WHERE id=?',(run_id,)).fetchone()
         if not run: raise HTTPException(404,'Run not found.')
+        if action == 'resume' and (json.loads(run['config']).get('grader_version') != GRADER_VERSION or json.loads(run['config']).get('task_policy_version') != TASK_POLICY_VERSION):
+            raise HTTPException(409, 'This legacy run uses a different grader and cannot be resumed safely.')
         current=run['state']
         if action=='pause' and current=='running': new='pausing'
         elif action=='resume' and current=='paused': new='queued'
