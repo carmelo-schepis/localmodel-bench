@@ -24,7 +24,7 @@ const OUTCOMES = {
   ungraded: { label: 'Ungraded' },
 };
 const MAX_TICKS = 240;
-const SMOKE_NOTE = 'Early smoke-test pack. Prompts repeat, so scores are provisional and have no uncertainty intervals. Coding output is not executed, essay quality is ungraded, and this custom result is not a validated benchmark.';
+const SMOKE_NOTE = 'Smoke-test pack: repeated attempts draw from two unique questions per category and are not independent evidence of broad model ability. Coding uses limited static evaluation; essay quality requires human review.';
 
 const state = {
   endpoints: [],
@@ -236,9 +236,9 @@ function sheet() {
     <div class="sheet-block">
       <h2>Categories</h2>
       <div class="category-grid">${CATEGORIES.map(name => `<label class="check"><input type="checkbox" data-key="category-${name}" data-category="${name}" ${state.categories.includes(name) ? 'checked' : ''}>${name}</label>`).join('')}</div>
-      <p>Writing needs human review, and coding scores are provisional.</p>
+      <p>Writing needs human review; coding uses limited static evaluation.</p>
     </div>
-    <p class="note">Early smoke-test release. Prompts repeat to exercise the workflow, so scores are provisional. Code is not run, essays are not auto-graded. Published Artificial Analysis figures appear on Compare when the server has an AA key.</p>
+    <p class="note">Smoke-test release: each category has two unique questions, repeated to exercise the workflow. Coding uses limited static evaluation; essays require human review. Published Artificial Analysis figures appear on Compare when the server has an AA key.</p>
     <div class="sheet-foot">
       <div class="tally"><span>${selectedModels() ? plural(selectedModels(), 'model') : 'No models chosen'}</span><span><b>${attempts.toLocaleString()}</b> attempts</span></div>
       ${state.startError ? `<p class="error" role="alert">${esc(state.startError)}</p>` : ''}
@@ -360,7 +360,7 @@ function inspector(run) {
       <div class="verdict ${outcome.bad ? 'is-bad' : ''}"><b>${outcome.label}</b><span>${esc(result.category)}</span><span>${seconds(result.elapsed)}</span><span>${result.tokens ? plural(result.tokens, 'token') : 'Tokens unavailable'}</span></div>
       <p class="inspect-source">${esc(result.endpoint)} / ${esc(result.model)}</p>
       <p class="prompt">${esc(result.question)}</p>
-      ${result.status === 'error' && result.reason ? `<p class="error">${esc(result.reason)}</p>` : ''}
+      ${result.reason ? `<p class="error">${esc(result.reason)}</p>` : ''}
       <pre class="answer ${body ? '' : 'is-blank'}" data-attempt="${index}" tabindex="0" aria-label="Model answer">${esc(body || 'The model returned no text.')}</pre>
     </div>
   </section>`;
@@ -410,7 +410,7 @@ function runScores(run) {
   return `<section aria-label="Scores">
     <div class="block-head"><h2>Measured here</h2><span>${run.complete ? 'Exploratory smoke-test result' : 'No complete composite'}</span></div>
     ${scoreTable(run)}
-    <div class="block-foot"><p class="note">${SMOKE_NOTE} <a class="text-link" href="#compare">See timing and tokens</a></p></div>
+    <div class="block-foot"><p class="note">${run.grader_version === 'legacy' ? 'Legacy grader: historical results are preserved as originally scored.' : ''} ${SMOKE_NOTE} <a class="text-link" href="#compare">See timing and tokens</a></p></div>
   </section>`;
 }
 
