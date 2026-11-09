@@ -1,6 +1,8 @@
+import asyncio
 import json
 import tempfile
 import unittest
+import httpx
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +20,54 @@ ARTIFACT = """<!doctype html><html><body>
   const m = document.createElement('p'); m.textContent = 'clicked ' + b.textContent; document.body.append(m);
 }))</script>
 </body></html>"""
+
+
+class LabStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_artifact_requests_disable_reasoning_and_read_content(self):
+        def respond(request):
+            payload = json.loads(request.content)
+            self.assertEqual(payload['reasoning_effort'], 'none')
+            self.assertEqual(payload['max_tokens'], 512)
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n\n')
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch.object(lab.httpx, 'AsyncClient', return_value=client):
+            result = await lab.complete_stream('http://ollama/v1', 'qwen3.5:4b', 'Return JSON', 512)
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['content'], '{}')
+
+    async def test_explicit_reasoning_parameter_rejection_retries_without_it(self):
+        requests = []
+        def respond(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                return httpx.Response(400, json={'error': 'unsupported parameter reasoning_effort'})
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n')
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch.object(lab.httpx, 'AsyncClient', return_value=client):
+            result = await lab.complete_stream('http://ollama/v1', 'qwen3.5:4b', 'test', 12)
+        self.assertEqual(result['content'], 'OK')
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]['reasoning_effort'], 'none')
+        self.assertNotIn('reasoning_effort', requests[1])
+
+    async def test_stream_clips_utf8_bytes_and_marks_truncation(self):
+        def event(text):
+            return 'data: ' + json.dumps({'choices': [{'delta': {'content': text}}]}) + '\n\n'
+        stream = event('AA🙂') + event('ZZ') + 'data: [DONE]\n\n'
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, text=stream)))
+        with patch.object(lab, 'ARTIFACT_LIMIT', 6), patch.object(lab.httpx, 'AsyncClient', return_value=client):
+            result = await lab.complete_stream('http://ollama/v1', 'm', 'p', 20)
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['content'].encode(), b'AA\xf0\x9f\x99\x82')
+        self.assertTrue(result['truncated'])
+        self.assertIn('limit', result['reason'])
+
+    async def test_malformed_sse_is_a_controlled_attempt_error(self):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, text='data: {oops}\n\n')))
+        with patch.object(lab.httpx, 'AsyncClient', return_value=client):
+            result = await lab.complete_stream('http://ollama/v1', 'm', 'p', 20)
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('malformed streaming data', result['reason'])
 
 
 def run_config(depth='Quick'):
@@ -89,6 +139,86 @@ class LabExecutionTests(unittest.IsolatedAsyncioTestCase):
         artifact = lab.load_artifact('run-1', 1)
         self.assertIn('</body>', artifact)
 
+    async def test_pause_during_inference_resumes_without_duplicate_attempt(self):
+        config = run_config()
+        config['fields'] = ['ui']
+        lab.insert_run('pause-resume', 'today', config)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        async def inference(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+            return {'status': 'ok', 'reason': None, 'elapsed': 0.1, 'content': ARTIFACT, 'tokens': 1, 'truncated': False}
+        with patch.object(lab, 'complete_stream', inference):
+            running = asyncio.create_task(lab.execute_lab_run('pause-resume'))
+            await asyncio.wait_for(started.wait(), 1)
+            with lab.connect_db() as db:
+                db.execute("UPDATE lab_runs SET state='pausing' WHERE id='pause-resume'")
+            release.set()
+            await running
+            paused = await lab.get_run('pause-resume')
+            self.assertEqual((paused['state'], paused['progress']), ('paused', 1))
+            with lab.connect_db() as db:
+                db.execute("UPDATE lab_runs SET state='running' WHERE id='pause-resume'")
+            await lab.execute_lab_run('pause-resume')
+        resumed = await lab.get_run('pause-resume')
+        self.assertEqual((resumed['state'], resumed['progress'], len(resumed['attempts'])), ('completed', 2, 2))
+        self.assertEqual(calls, 2)
+
+    async def test_pause_during_final_attempt_persists_paused_then_resumes_to_complete(self):
+        config = run_config()
+        config['fields'] = ['extras']
+        lab.insert_run('final-pause', 'today', config)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        async def inference(*args):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return {'status': 'ok', 'reason': None, 'elapsed': 0.1, 'content': '{bad}', 'tokens': 1, 'truncated': False}
+        with patch.object(lab, 'complete_stream', inference):
+            running = asyncio.create_task(lab.execute_lab_run('final-pause'))
+            await asyncio.wait_for(started.wait(), 1)
+            with lab.connect_db() as db:
+                db.execute("UPDATE lab_runs SET state='pausing' WHERE id='final-pause'")
+            release.set()
+            await running
+            paused = await lab.get_run('final-pause')
+            self.assertEqual((paused['state'], paused['progress']), ('paused', 1))
+            with lab.connect_db() as db:
+                db.execute("UPDATE lab_runs SET state='running' WHERE id='final-pause'")
+            await lab.execute_lab_run('final-pause')
+        done = await lab.get_run('final-pause')
+        self.assertEqual(done['state'], 'completed')
+        self.assertEqual(calls, 1)
+
+    async def test_cancel_during_inference_is_not_overwritten(self):
+        config = run_config()
+        config['fields'] = ['ui']
+        lab.insert_run('cancel-during', 'today', config)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        async def inference(*args):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return {'status': 'ok', 'reason': None, 'elapsed': 0.1, 'content': ARTIFACT, 'tokens': 1, 'truncated': False}
+        with patch.object(lab, 'complete_stream', inference):
+            running = asyncio.create_task(lab.execute_lab_run('cancel-during'))
+            await asyncio.wait_for(started.wait(), 1)
+            with lab.connect_db() as db:
+                db.execute("UPDATE lab_runs SET state='cancelled' WHERE id='cancel-during'")
+            release.set()
+            await running
+        cancelled = await lab.get_run('cancel-during')
+        self.assertEqual((cancelled['state'], cancelled['progress'], len(cancelled['attempts'])), ('cancelled', 1, 1))
+        self.assertEqual(calls, 1)
+
     async def test_model_returning_nothing_is_marked_error(self):
         config = run_config()
         config['fields'] = ['extras']
@@ -145,6 +275,20 @@ class LabExecutionTests(unittest.IsolatedAsyncioTestCase):
         lab.initialize()
         with lab.connect_db() as db:
             self.assertEqual(db.execute("SELECT state FROM lab_runs WHERE id='interrupt'").fetchone()['state'], 'interrupted')
+
+    async def test_completed_artifact_checks_and_review_survive_restart(self):
+        config = run_config()
+        lab.insert_run('persistent', 'today', config)
+        with lab.connect_db() as db:
+            db.execute("UPDATE lab_runs SET state='completed', progress=1, total=1 WHERE id='persistent'")
+            db.execute("INSERT INTO lab_results(run_id,attempt,endpoint,model,field,task,prompt,html,status,auto,review) VALUES('persistent',1,'Ollama','m','ui','landing','?',?,'ok',?,?)",
+                       (ARTIFACT, json.dumps({'collected': True, 'errors': 0, 'buttonCount': 1, 'buttons': [{'label': 'Free', 'changedDom': True}]}), json.dumps({'visuals': 4, 'buttons': 'yes'})))
+        lab.initialize()
+        run = await lab.get_run('persistent')
+        self.assertEqual(run['state'], 'completed')
+        self.assertIn('Fernbloom', lab.load_artifact('persistent', 1))
+        self.assertEqual(run['attempts'][0]['review'], {'visuals': 4, 'buttons': 'yes'})
+        self.assertEqual(run['attempts'][0]['auto']['collected'], True)
 
 
 class ArtifactServingTests(unittest.IsolatedAsyncioTestCase):
@@ -218,6 +362,16 @@ class ReviewAndCheckTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(fastapi.HTTPException) as caught:
             await lab.put_review('review', lab.ReviewRequest(attempt=1, playable='yes'))
         self.assertEqual(caught.exception.status_code, 422)
+        with self.assertRaises(fastapi.HTTPException) as caught:
+            await lab.put_review('review', lab.ReviewRequest(attempt=3, visuals=3))
+        self.assertEqual(caught.exception.status_code, 422)
+        with lab.connect_db() as db:
+            db.execute("INSERT INTO lab_results(run_id,attempt,endpoint,model,field,task,prompt,status) VALUES('review',4,'Ollama','m','ui','landing','?','error')")
+        with self.assertRaises(fastapi.HTTPException) as caught:
+            await lab.put_review('review', lab.ReviewRequest(attempt=4, visuals=5))
+        self.assertEqual(caught.exception.status_code, 422)
+        with lab.connect_db() as db:
+            self.assertEqual(db.execute("SELECT review FROM lab_results WHERE run_id='review' AND attempt=3").fetchone()['review'], '{}')
 
     async def test_checks_persist_into_the_auto_column(self):
         payload = lab.CheckRequest(attempt=1, collected=True, errors=0, canvas=False, animation=None,
@@ -256,6 +410,18 @@ class ReviewAndCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lab.task_score('extras', 'not json at all'), 0.0)
         self.assertEqual(lab.task_score('extras', '{"items":{"apple":{"qty":3,"revenue":5.5}},"grand_total":7.0}'), 0.0)
         self.assertEqual(lab.task_score('ui', ARTIFACT), 0.0)
+
+    async def test_timeout_checks_never_create_a_passing_load_score(self):
+        payload = {'collected': False, 'errors': 0, 'canvas': None, 'animation': None, 'structure': None, 'buttonCount': 0}
+        checks = lab.auto_checks(payload, 'game')
+        self.assertTrue(all(check['pass'] is None for check in checks))
+        self.assertIsNone(lab.auto_score(payload, 'game'))
+
+    async def test_dashboard_row_count_check_uses_task_data(self):
+        good = lab.auto_checks({'collected': True, 'errors': 0, 'buttonCount': 0, 'rowCount': len(lab.DASHBOARD_DATA)}, 'dashboard')
+        bad = lab.auto_checks({'collected': True, 'errors': 0, 'buttonCount': 0, 'rowCount': 2}, 'dashboard')
+        self.assertTrue(next(check for check in good if check['name'].startswith('Dashboard'))['pass'])
+        self.assertFalse(next(check for check in bad if check['name'].startswith('Dashboard'))['pass'])
 
 
 class SerializationTests(unittest.TestCase):

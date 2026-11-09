@@ -1,128 +1,168 @@
-/* Runs inside sandboxed artifact previews only (injected by /api/lab/runs/{id}/artifacts/{attempt}).
-   Measures the generated page, then reports one result message to the parent frame. */
+/* Preview-only instrumentation. The server injects this script before model
+   scripts; raw artifacts are served byte-for-byte without this code. */
 (function () {
   'use strict';
+  var params = new URLSearchParams(location.search);
+  var scriptParams = new URLSearchParams(document.currentScript ? new URL(document.currentScript.src, location.href).search : '');
   var result = {
-    source: 'lab-harness',
-    collected: true,
-    errors: 0,
-    canvas: false,
-    structure: false,
-    animation: null,
-    buttonCount: 0,
-    buttons: [],
-    inputFound: null,
-    inputTyped: false,
+    source: 'lab-harness', runId: params.get('labRun') || scriptParams.get('labRun'),
+    attempt: Number(params.get('attempt') || scriptParams.get('attempt')),
+    nonce: params.get('nonce') || scriptParams.get('nonce'), collected: true, errors: 0, canvas: false,
+    structure: null, animation: null, buttonCount: 0, controlsTotal: 0,
+    controlsTested: 0, controlsCapped: false, buttons: [], inputFound: null,
+    inputTyped: null, inputValid: null, inputValidationMessage: null, rowCount: null,
   };
   var failingClick = null;
+  var appFrames = 0;
+  var sent = false;
+  var nativeRAF = window.requestAnimationFrame.bind(window);
+  function postResult() {
+    if (sent) return;
+    sent = true;
+    try { window.parent.postMessage(result, '*'); } catch (_) { /* parent unavailable */ }
+  }
+
+  // Count only callbacks registered by generated code. Harness sampling uses
+  // nativeRAF directly below, so its own activity cannot pass this check.
+  window.requestAnimationFrame = function (callback) {
+    return nativeRAF(function (timestamp) {
+      appFrames += 1;
+      callback(timestamp);
+    });
+  };
 
   function noteError() {
     result.errors += 1;
-    if (failingClick) {
-      failingClick.threwException = true;
-      failingClick = null;
-    }
+    if (failingClick) failingClick.threwException = true;
   }
   window.addEventListener('error', noteError);
   window.addEventListener('unhandledrejection', noteError);
+  // Preserve anchor click handlers but prevent their default navigation.
+  document.addEventListener('click', function (event) {
+    if (event.target && event.target.closest && event.target.closest('a[href]')) event.preventDefault();
+  }, true);
 
   function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
-  function frame() { return new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); }); }
-
+  function nextFrame() { return new Promise(function (resolve) { nativeRAF(resolve); }); }
   function visible(el) {
     var rect = el.getBoundingClientRect();
     var style = getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   }
-
-  function snapshot() {
-    try { return document.documentElement.outerHTML; }
-    catch (err) { return null; }
-  }
-
-  function canvasSignature() {
-    var canvas = document.querySelector('canvas');
-    if (!canvas) return null;
-    try { return canvas.offsetWidth + ':' + canvas.toDataURL().length; }
-    catch (err) { return 'unreadable:' + canvas.offsetWidth; }
-  }
-
   function labelOf(el) {
-    var text = el.getAttribute('aria-label') || el.textContent || el.tagName;
-    return String(text).replace(/\s+/g, ' ').trim().slice(0, 60);
+    return String(el.getAttribute('aria-label') || el.textContent || el.tagName).replace(/\s+/g, ' ').trim().slice(0, 60);
   }
-
+  function scopeOf(el) {
+    return el.closest('section, form, article, [role="tabpanel"], li') || el.parentElement || el;
+  }
+  function scopeSnapshot(el) {
+    var scope = scopeOf(el);
+    return scope ? scope.innerHTML + '|' + Array.prototype.map.call(scope.attributes || [], function (a) { return a.name + '=' + a.value; }).join('|') : '';
+  }
+  function visibleControls() {
+    return Array.prototype.slice.call(document.querySelectorAll('button, [role="button"], summary, a[href]')).filter(function (el) {
+      return visible(el) && !el.disabled;
+    });
+  }
+  function canvasHash(canvas) {
+    try {
+      var context = canvas.getContext('2d');
+      if (!context || !canvas.width || !canvas.height) return null;
+      var image = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      var hash = 2166136261;
+      // Sample all pixels up to a fixed bound, including real color bytes.
+      var stride = Math.max(4, Math.floor(image.length / 12000 / 4) * 4);
+      for (var i = 0; i < image.length; i += stride) hash = Math.imul(hash ^ image[i], 16777619);
+      return String(hash >>> 0);
+    } catch (_) { return null; }
+  }
   function testInput() {
-    var input = null;
-    var candidates = [].slice.call(document.querySelectorAll('input:not([type="hidden"]), textarea'));
-    for (var i = 0; i < candidates.length; i += 1) {
-      if (visible(candidates[i])) { input = candidates[i]; break; }
-    }
+    var candidates = Array.prototype.slice.call(document.querySelectorAll('input:not([type="hidden"]), textarea'));
+    var input = candidates.find(function (el) {
+      var type = String(el.type || 'text').toLowerCase();
+      return visible(el) && ['text', 'email', 'url', 'tel', 'search'].indexOf(type) !== -1;
+    });
     result.inputFound = Boolean(input);
     if (!input) return;
     try {
+      var oldValue = input.value;
+      var type = String(input.type || 'text').toLowerCase();
       input.focus();
-      var before = input.value;
-      input.value = before + 'bench';
+      input.value = type === 'email' ? 'invalid-email' : (input.required || input.pattern) ? '' : oldValue + 'bench';
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      result.inputTyped = input.value.indexOf('bench') !== -1;
       input.dispatchEvent(new Event('change', { bubbles: true }));
-    } catch (err) { result.inputTyped = false; }
+      result.inputTyped = type === 'email' ? true : input.value !== oldValue;
+      result.inputValid = input.checkValidity();
+      result.inputValidationMessage = String(input.validationMessage || '').slice(0, 300);
+      input.value = oldValue;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (_) {
+      result.inputTyped = false;
+      result.inputValid = null;
+    }
   }
-
-  function clickableElements() {
-    var selectors = 'button, [role="button"], summary, a[href]';
-    return [].slice.call(document.querySelectorAll(selectors)).filter(function (el) {
-      if (!visible(el)) return false;
-      if (el.disabled) return false;
-      // Skip anchor-only tabs whose only purpose is page navigation proxies for this test.
-      return true;
-    }).slice(0, 25);
+  function landingStructure() {
+    return Boolean(document.querySelector('header') && document.querySelector('nav') &&
+      document.querySelector('main') && document.querySelector('footer') &&
+      document.querySelectorAll('button').length >= 3);
   }
 
   async function run() {
-    var guard = 0;
-    while (document.readyState !== 'complete' && guard < 40) { guard += 1; await wait(120); }
-    await frame();
+    // The external harness was inserted before model scripts. Wait for the
+    // document's load event and two paint frames before observing the artifact.
+    if (document.readyState !== 'complete') {
+      await new Promise(function (resolve) { window.addEventListener('load', resolve, { once: true }); });
+    }
+    await nextFrame(); await nextFrame();
     result.canvas = Boolean(document.querySelector('canvas'));
-    result.structure = Boolean(
-      document.querySelector('header') && document.querySelector('footer') &&
-      document.querySelector('h1, h2') && [].slice.call(document.querySelectorAll('ul li, ol li')).length >= 2);
+    result.structure = landingStructure();
+    result.rowCount = document.querySelectorAll('table tbody tr').length;
     testInput();
 
-    // Give the page a keyboard nudge (safe if unused) and start the animation window.
-    try { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); } catch (err) { /* synthetic events unsupported */ }
-    var animationStart = canvasSignature();
-    var mutations = 0;
-    var observer = new MutationObserver(function () { mutations += 1; });
-    if (document.body) observer.observe(document.body, { childList: true, attributes: true, characterData: true, subtree: true });
-
-    var clickables = clickableElements();
-    result.buttonCount = clickables.length;
-    for (var index = 0; index < clickables.length; index += 1) {
-      var el = clickables[index];
+    var controls = visibleControls();
+    result.controlsTotal = controls.length;
+    result.controlsTested = Math.min(controls.length, 25);
+    result.controlsCapped = controls.length > 25;
+    result.buttonCount = result.controlsTotal;
+    var testWindowStart = performance.now();
+    var startFrames = appFrames;
+    for (var index = 0; index < result.controlsTested; index += 1) {
+      var el = controls[index];
       var entry = { label: labelOf(el), threwException: false, changedDom: false };
       result.buttons.push(entry);
-      var before = snapshot();
+      var before = scopeSnapshot(el);
       failingClick = entry;
-      try {
-        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await wait(150);
-      } catch (err) {
-        entry.threwException = true;
-      }
+      try { el.click(); } catch (_) { entry.threwException = true; }
+      await wait(110);
+      var after = scopeSnapshot(el);
+      entry.changedDom = before !== after;
       failingClick = null;
-      var after = snapshot();
-      if (before !== null && after !== null && before !== after) entry.changedDom = true;
-      await wait(60);
+      await wait(30);
     }
 
-    await wait(Math.max(0, 1500 - (result.buttons.length * 210)));
-    observer.disconnect();
-    var animationEnd = canvasSignature();
-    result.animation = mutations > 4 || (animationStart !== null && animationStart !== animationEnd);
-    try { window.parent.postMessage(result, '*'); } catch (err) { /* no reachable parent */ }
+    // Sample actual application rAF requests and canvas pixels separately from
+    // harness frames. Pixel bytes catch same-sized visual changes.
+    var canvas = document.querySelector('canvas');
+    var pixelStart = canvas ? canvasHash(canvas) : null;
+    await wait(Math.max(0, 1500 - (performance.now() - testWindowStart)));
+    var pixelEnd = canvas ? canvasHash(canvas) : null;
+    result.animation = appFrames - startFrames > 2 || (pixelStart !== null && pixelEnd !== null && pixelStart !== pixelEnd);
+    result.animationMeasurement = { applicationFrames: appFrames - startFrames, canvasChanged: pixelStart !== null && pixelEnd !== null ? pixelStart !== pixelEnd : null };
+    postResult();
   }
 
-  run();
+  // Keep the collection bounded even when a model-created page hangs a handler.
+  Promise.race([run().then(function () { return 'done'; }), wait(7000).then(function () { return 'timeout'; })]).then(function (winner) {
+    if (winner === 'timeout') {
+      result.collected = false;
+      result.errors = null;
+      result.animation = null;
+      postResult();
+    }
+  }).catch(function () {
+    result.collected = false;
+    result.errors = null;
+    postResult();
+  });
 })();

@@ -224,33 +224,45 @@ def task_score(field: str, text: str) -> float:
 
 def auto_checks(payload: dict, key: str) -> list[dict]:
     """Turn a harness payload into a display-ready pass/fail/skip checklist."""
+    uncollected = payload.get('collected') is False
     buttons = payload.get('buttons') if isinstance(payload.get('buttons'), list) else []
     wired_buttons = sum(1 for b in buttons if isinstance(b, dict) and b.get('changedDom') and not b.get('threwException'))
     button_count = payload.get('buttonCount') or len(buttons)
     has_buttons = button_count > 0
-    errors = payload.get('errors', 0)
+    errors = payload.get('errors')
     checks = [
-        {'name': 'Loads without uncaught errors', 'pass': False if errors else None if not payload else True,
-         'detail': f'{errors} uncaught error{"s" if errors == 1 else ""}'},
-        {'name': 'Buttons respond when clicked', 'pass': (wired_buttons == button_count) if has_buttons else None,
-         'detail': f'{wired_buttons} of {button_count} responded'},
+        {'name': 'Loads without uncaught errors', 'pass': (errors == 0) if isinstance(errors, int) and not uncollected else None,
+         'detail': f'{errors} uncaught error{"s" if errors == 1 else ""}' if isinstance(errors, int) and not uncollected else 'not collected' if uncollected else 'not measured'},
+        {'name': 'Buttons respond when clicked', 'pass': (wired_buttons == button_count) if has_buttons and not uncollected and not payload.get('controlsCapped') else None,
+         'detail': (f'{wired_buttons} of {button_count} responded' if not uncollected else 'not collected') + ('; coverage capped' if payload.get('controlsCapped') else '')},
     ]
+    if payload.get('controlsCapped') is True:
+        checks.append({'name': 'Visible controls covered', 'pass': None,
+                       'detail': f"tested {payload.get('controlsTested', len(buttons))} of {payload.get('buttonCount', len(buttons))}; capped at 25"})
     if key == 'game':
         canvas = payload.get('canvas')
         animation = payload.get('animation')
         checks.append({'name': 'Canvas board present',
-                       'pass': True if canvas else (False if canvas is False else None),
+                       'pass': True if canvas and not uncollected else (False if canvas is False and not uncollected else None),
                        'detail': '' if canvas else 'no <canvas> found'})
-        checks.append({'name': 'Animation loop detected', 'pass': True if animation else (False if animation is False else None),
+        checks.append({'name': 'Animation loop detected', 'pass': True if animation and not uncollected else (False if animation is False and not uncollected else None),
                        'detail': 'frames kept advancing' if animation else 'no advancing frames measured'})
     if key == 'landing':
         structure = payload.get('structure')
         checks.append({'name': 'Header, hero, features and footer present',
-                       'pass': True if structure else (False if structure is False else None), 'detail': ''})
+                       'pass': True if structure and not uncollected else (False if structure is False and not uncollected else None), 'detail': ''})
+    if key == 'dashboard':
+        row_count = payload.get('rowCount')
+        checks.append({'name': 'Dashboard row count matches task data',
+                       'pass': row_count == len(DASHBOARD_DATA) if isinstance(row_count, int) and not uncollected else None,
+                       'detail': f'{row_count} rows; expected {len(DASHBOARD_DATA)}' if isinstance(row_count, int) else 'not measured'})
     # Text input behaviour only shows when the harness actually met an input.
     if payload.get('inputFound') is True:
-        checks.append({'name': 'Text input accepts typing', 'pass': bool(payload.get('inputTyped')),
-                       'detail': 'changed on input event' if payload.get('inputTyped') else 'value or event ignored'})
+        checks.append({'name': 'Text input accepts typing', 'pass': payload.get('inputTyped'),
+                       'detail': 'changed on input event' if payload.get('inputTyped') is True else 'value or event ignored' if payload.get('inputTyped') is False else 'not measured'})
+        if payload.get('inputValid') is not None:
+            checks.append({'name': 'Input validation measured', 'pass': None,
+                           'detail': payload.get('inputValidationMessage') or ('valid input' if payload['inputValid'] else 'invalid input')})
     return checks
 
 
@@ -309,8 +321,9 @@ def serialize_lab_run(run_id: str) -> dict:
         item = attempt_row(row)
         if row['field'] == 'extras':
             item['autoScore'] = item['auto'].get('score') if isinstance(item['auto'].get('score'), (int, float)) else None
-            item['autoChecks'] = [{'name': 'Deterministic schema check', 'pass': item['autoScore'] is not None and item['autoScore'] > 0,
-                                   'detail': 'score stored at generation time'}]
+            item['autoChecks'] = [{'name': 'Deterministic schema check',
+                                   'pass': (item['autoScore'] > 0) if item['autoScore'] is not None else None,
+                                   'detail': 'score stored at generation time' if item['autoScore'] is not None else 'not measured: no usable model response'}]
         else:
             item['autoScore'] = auto_score(item['auto'], row['task'])
             item['autoChecks'] = auto_checks(item['auto'], row['task'])
@@ -325,39 +338,62 @@ def serialize_lab_run(run_id: str) -> dict:
 async def complete_stream(url: str, model: str, prompt: str, max_tokens: int) -> dict:
     """One streaming chat completion, mirroring main.execute_run's request shape."""
     started = time.monotonic()
-    body = ''
+    body_parts: list[str] = []
+    body_bytes = 0
     tokens: int | None = None
     truncated = False
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=300, write=20, pool=5)) as client:
-            response = await client.post(url + '/chat/completions', json={
+            request_json = {
                 'model': model, 'messages': [{'role': 'user', 'content': prompt}],
                 'temperature': 0, 'stream': True, 'max_tokens': max_tokens,
-                'stream_options': {'include_usage': True}})
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.startswith('data:'):
-                    continue
-                payload = line[5:].strip()
-                if not payload or payload == '[DONE]':
-                    continue
-                chunk = json.loads(payload)
-                usage = chunk.get('usage')
-                if usage and isinstance(usage.get('completion_tokens'), int):
-                    tokens = usage['completion_tokens']
-                for choice in chunk.get('choices', []):
-                    text = (choice.get('delta') or {}).get('content')
-                    if isinstance(text, str) and text:
-                        body += text
-                        if len(body) > ARTIFACT_LIMIT:
-                            truncated = True
-                            response.close()
+                'reasoning_effort': 'none', 'stream_options': {'include_usage': True}}
+            # Some OpenAI-compatible servers reject reasoning_effort. Retry only
+            # this explicit parameter-compatibility case, never a generic failure.
+            for request_number in range(2):
+                async with client.stream('POST', url + '/chat/completions', json=request_json) as response:
+                    if response.status_code in (400, 422) and request_number == 0:
+                        response_error = (await response.aread()).decode('utf-8', 'replace').lower()
+                        if 'reasoning_effort' in response_error and any(word in response_error for word in ('unsupported', 'unknown', 'extra')):
+                            request_json.pop('reasoning_effort', None)
+                            continue
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith('data:'):
+                            continue
+                        event_data = line[5:].strip()
+                        if not event_data or event_data == '[DONE]':
+                            continue
+                        try:
+                            chunk = json.loads(event_data)
+                        except json.JSONDecodeError as err:
+                            raise ValueError('The model returned malformed streaming data.') from err
+                        usage = chunk.get('usage')
+                        if usage and isinstance(usage.get('completion_tokens'), int):
+                            tokens = usage['completion_tokens']
+                        for choice in chunk.get('choices', []):
+                            # Deliberately use content only; reasoning tokens are never
+                            # treated as generated HTML or JSON artifacts.
+                            text = (choice.get('delta') or {}).get('content')
+                            if isinstance(text, str) and text:
+                                remaining = ARTIFACT_LIMIT - body_bytes
+                                encoded = text.encode('utf-8')
+                                if len(encoded) > remaining:
+                                    clipped = encoded[:remaining].decode('utf-8', 'ignore')
+                                    if clipped:
+                                        body_parts.append(clipped)
+                                    body_bytes += len(clipped.encode('utf-8'))
+                                    truncated = True
+                                    break
+                                body_parts.append(text)
+                                body_bytes += len(encoded)
+                        if truncated:
                             break
-                if truncated:
                     break
     except Exception as err:
         return {'status': 'error', 'reason': bench.safe_error(err), 'elapsed': time.monotonic() - started,
-                'content': body, 'tokens': tokens, 'truncated': False}
+                'content': ''.join(body_parts), 'tokens': tokens, 'truncated': False}
+    body = ''.join(body_parts)
     if not body.strip():
         return {'status': 'error', 'reason': 'The model returned no text.',
                 'elapsed': time.monotonic() - started, 'content': '', 'tokens': tokens, 'truncated': truncated}
@@ -392,7 +428,10 @@ async def execute_lab_run(run_id: str) -> None:
             for task in planned:
                 with connect_db() as db:
                     state = db.execute('SELECT state FROM lab_runs WHERE id=?', (run_id,)).fetchone()['state']
-                if state not in ('running',):
+                    if state == 'pausing':
+                        db.execute("UPDATE lab_runs SET state='paused' WHERE id=? AND state='pausing'", (run_id,))
+                        state = 'paused'
+                if state != 'running':
                     return
                 attempt += 1
                 if attempt <= progress:
@@ -414,8 +453,12 @@ async def execute_lab_run(run_id: str) -> None:
                                 int(wrapped), int(outcome['truncated']), json.dumps(grade), '{}'))
                     db.execute('UPDATE lab_runs SET progress=? WHERE id=?', (progress, run_id))
     with connect_db() as db:
-        if db.execute('SELECT state FROM lab_runs WHERE id=?', (run_id,)).fetchone()['state'] == 'running':
-            db.execute("UPDATE lab_runs SET state='completed' WHERE id=?", (run_id,))
+        state = db.execute('SELECT state FROM lab_runs WHERE id=?', (run_id,)).fetchone()['state']
+        if state == 'running':
+            db.execute("UPDATE lab_runs SET state='completed' WHERE id=? AND state='running'", (run_id,))
+        elif state == 'pausing':
+            # A pause requested during the last inference still wins over completion.
+            db.execute("UPDATE lab_runs SET state='paused' WHERE id=? AND state='pausing'", (run_id,))
     LAB_LOG.info('Lab run %s finished with %d attempts', run_id, progress)
 
 
@@ -479,14 +522,19 @@ class ReviewRequest(BaseModel):
 class CheckRequest(BaseModel):
     attempt: int = Field(ge=1)
     collected: bool = True
-    errors: int = Field(default=0, ge=0, le=10_000)
+    errors: int | None = Field(default=None, ge=0, le=10_000)
     canvas: bool | None = None
     animation: bool | None = None
     structure: bool | None = None
     buttonCount: int = Field(default=0, ge=0, le=10_000)
     buttons: list[dict] = Field(default_factory=list, max_length=25)
+    controlsTested: int | None = Field(default=None, ge=0, le=25)
+    controlsCapped: bool = False
     inputFound: bool | None = None
     inputTyped: bool | None = None
+    inputValid: bool | None = None
+    inputValidationMessage: str | None = Field(default=None, max_length=300)
+    rowCount: int | None = Field(default=None, ge=0, le=10_000)
 
 
 def clean_buttons(buttons: list) -> list[dict]:
@@ -602,6 +650,9 @@ async def put_checks(run_id: str, payload: CheckRequest):
         data = {'collected': payload.collected, 'errors': payload.errors, 'buttonCount': payload.buttonCount,
                 'canvas': payload.canvas, 'animation': payload.animation, 'structure': payload.structure,
                 'inputFound': payload.inputFound, 'inputTyped': payload.inputTyped,
+                'inputValid': payload.inputValid, 'inputValidationMessage': payload.inputValidationMessage,
+                'rowCount': payload.rowCount,
+                'controlsTested': payload.controlsTested, 'controlsCapped': payload.controlsCapped,
                 'buttons': clean_buttons(payload.buttons)}
         db.execute('UPDATE lab_results SET auto=? WHERE run_id=? AND attempt=?',
                    (json.dumps(data), run_id, payload.attempt))
@@ -611,9 +662,13 @@ async def put_checks(run_id: str, payload: CheckRequest):
 @router.post('/runs/{run_id}/review')
 async def put_review(run_id: str, payload: ReviewRequest):
     with connect_db() as db:
-        row = db.execute('SELECT field, task, review FROM lab_results WHERE run_id=? AND attempt=?', (run_id, payload.attempt)).fetchone()
+        row = db.execute('SELECT field, task, review, status, html FROM lab_results WHERE run_id=? AND attempt=?', (run_id, payload.attempt)).fetchone()
         if not row:
             raise HTTPException(404, 'Attempt not found.')
+        if row['status'] != 'ok' or not row['html']:
+            raise HTTPException(422, 'Reviews apply only to successful HTML artifacts.')
+        if payload.visuals is not None and row['field'] not in ('ui', 'coding'):
+            raise HTTPException(422, 'Visuals ratings only apply to HTML artifact tasks.')
         if payload.buttons is not None and row['field'] != 'ui':
             raise HTTPException(422, 'The buttons verdict only applies to UI tasks.')
         if payload.playable is not None and row['task'] != 'game':
@@ -670,10 +725,25 @@ async def artifact_preview(run_id: str, attempt: int):
     """The stored artifact with one harness script tag, used by the sandboxed iframe.
     The stored artifact itself is never modified."""
     html = load_artifact(run_id, attempt)
-    harness = b'<script src="/assets/lab-harness.js"></script>'
+    with connect_db() as db:
+        task = db.execute('SELECT task FROM lab_results WHERE run_id=? AND attempt=?', (run_id, attempt)).fetchone()
+    expected_rows = len(DASHBOARD_DATA) if task and task['task'] == 'dashboard' else 0
+    harness = f'<script src="/assets/lab-harness.js?expectedRows={expected_rows}"></script>'.encode()
     encoded = html.encode('utf-8', 'replace')
-    if re.search(rb'</body>', encoded, re.I):
-        encoded = re.sub(rb'</body>', harness + b'</body>', encoded, count=1, flags=re.I)
+    # Install instrumentation before every model script so early exceptions and
+    # animation requests are observable. This transforms only the preview body.
+    script_match = re.search(rb'<script\b', encoded, re.I)
+    head_end = re.search(rb'</head\s*>', encoded, re.I)
+    if script_match:
+        position = script_match.start()
+        encoded = encoded[:position] + harness + encoded[position:]
+    elif head_end:
+        position = head_end.start()
+        encoded = encoded[:position] + harness + encoded[position:]
+    elif re.search(rb'<html\b[^>]*>', encoded, re.I):
+        match = re.search(rb'<html\b[^>]*>', encoded, re.I)
+        position = match.end()
+        encoded = encoded[:position] + harness + encoded[position:]
     else:
         encoded += harness
     return HTMLResponse(encoded, headers={'Content-Security-Policy': 'sandbox allow-scripts'})
