@@ -308,6 +308,15 @@ function labView() {
 
 /* ------------------------------- Run view ---------------------------- */
 
+/* One toggle keeps its data-key across running, pausing and paused, so keyboard focus
+   survives the change instead of falling back to the page. Pausing is shown but inert. */
+function labToggle(run) {
+  if (run.state === 'running') return '<button class="button quiet" data-key="lab-toggle" data-lab-pause>Pause</button>';
+  if (run.state === 'pausing') return '<button class="button quiet" data-key="lab-toggle" data-lab-pausing aria-disabled="true">Pausing…</button>';
+  if (run.state === 'paused') return '<button class="button" data-key="lab-toggle" data-lab-resume>Resume</button>';
+  return '';
+}
+
 function labHead(run) {
   const live = !LAB_STATES.has(run.state);
   return `<header class="page-head">
@@ -319,7 +328,7 @@ function labHead(run) {
     </div>
     <div class="run-count">
       <b aria-label="${run.progress} of ${run.total} attempts">${run.progress.toLocaleString()}<span>/${run.total.toLocaleString()}</span></b>
-      ${live ? `${run.state === 'running' ? '<button class="button quiet" data-key="lab-pause" data-lab-pause>Pause</button>' : ''}${run.state === 'paused' ? '<button class="button" data-key="lab-resume" data-lab-resume>Resume</button>' : ''}<button class="button cancel-run" data-key="lab-cancel" data-lab-cancel>Cancel lab run</button>` : '<a class="button" href="#lab">New lab run</a>'}
+      ${live ? `${labToggle(run)}<button class="button" data-key="lab-cancel" data-lab-cancel>Cancel lab run</button>` : '<a class="button" href="#lab">New lab run</a>'}
     </div>
   </header>`;
 }
