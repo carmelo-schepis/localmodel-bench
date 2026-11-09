@@ -310,6 +310,7 @@ main[data-layout="run"] { display: grid; grid-template-columns: minmax(0, 2fr) m
 .tick.is-match { --h: 100%; --c: var(--ink); }
 .tick.is-miss { --h: 34%; --c: var(--signal); }
 .tick.is-ungraded { --h: 60%; --c: #707070; }
+.tick.is-incomplete { --h: 80%; --c: transparent; box-shadow: inset 0 0 0 1px var(--signal); }
 .tick.is-error { --h: 100%; --c: transparent; box-shadow: inset 0 0 0 1px var(--signal); }
 .tick[data-attempt] { cursor: pointer; }
 .tick[data-attempt]:hover { background-color: #1c1c1c; }

@@ -21,6 +21,7 @@ const OUTCOMES = {
   match: { label: 'Match' },
   miss: { label: 'No match', bad: true },
   error: { label: 'Error', bad: true },
+  incomplete: { label: 'Incomplete', bad: true },
   ungraded: { label: 'Ungraded' },
 };
 const MAX_TICKS = 240;
@@ -133,6 +134,7 @@ const plural = (count, word) => `${count.toLocaleString()} ${word}${count === 1 
 const sameModel = (a, b) => a.endpoint === b.endpoint && a.model === b.model;
 const outcomeOf = result => {
   if (result.status === 'error') return 'error';
+  if (result.status === 'incomplete') return 'incomplete';
   if (result.score === null || result.score === undefined) return 'ungraded';
   return result.score > 0 ? 'match' : 'miss';
 };
@@ -304,7 +306,7 @@ function runHead(run) {
 
 function tickFor(bucket, latest, selected) {
   if (!bucket.length) return '<i class="tick"></i>';
-  const severity = ['error', 'miss', 'ungraded', 'match'];
+  const severity = ['error', 'incomplete', 'miss', 'ungraded', 'match'];
   const outcome = severity.find(name => bucket.some(item => outcomeOf(item.result) === name));
   const shown = bucket.find(item => outcomeOf(item.result) === outcome);
   const classes = [`tick is-${outcome}`];
@@ -456,7 +458,7 @@ function compareView() {
     matrix: `${failure}<section aria-label="Scores">
       <div class="block-head"><h2>Measured here</h2><span>${run.complete ? 'Exploratory smoke-test result' : 'No complete composite'}</span></div>
       ${scoreTable(run)}
-      <div class="block-foot"><p class="note">${SMOKE_NOTE}</p></div>
+      <div class="block-foot"><p class="note">${run.grader_version === 'legacy' ? 'Legacy grader: historical results are preserved as originally scored.' : ''} ${SMOKE_NOTE}</p></div>
     </section>`,
     detail: rows ? `<section aria-label="Timing and tokens">
       <div class="block-head"><h2>Timing and tokens</h2></div>
