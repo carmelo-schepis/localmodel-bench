@@ -518,6 +518,9 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 .lab-loading .spin { flex: none; }
 .lab-tape-pending th, .lab-tape-pending td, .lab-row-pending { color: var(--ink-2); }
 .lab-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+/* Measured here: the last column keeps the page gutter. The shared .scores cell padding would
+   otherwise win, since it is declared later and sets 12px on every cell. */
+main[data-layout="labrun"] .lab-rollup :is(th, td):last-child { padding-right: var(--gutter); }
 
 /* Narrower screens */
 @media (max-width: 1320px) {

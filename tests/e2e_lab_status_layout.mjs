@@ -13,7 +13,7 @@ const base = (process.env.LAB_E2E_BASE || 'http://127.0.0.1:8091').replace(/\/$/
 const output = path.resolve('artifacts/lab-status-layout');
 fs.mkdirSync(output, { recursive: true });
 const profile = fs.mkdtempSync('/dev/shm/lab-status-profile-');
-const report = { base, startedAt: new Date().toISOString(), assertions: [], consoleErrors: [], pageErrors: [], failedRequests: [], screenshots: [], forcedOutages: 0 };
+const report = { base, startedAt: new Date().toISOString(), assertions: [], consoleErrors: [], pageErrors: [], failedRequests: [], screenshots: [], forcedOutages: 0, postRequests: [] };
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
   report.assertions.push(message);
@@ -99,7 +99,7 @@ function attach(page, scenario) {
       if (scenario.runFail) { report.forcedOutages += 1; return json({ detail: 'fixture outage' }, 500); }
       return json(scenario.run);
     }
-    if (request.method() !== 'GET') return json({});
+    if (request.method() !== 'GET') { report.postRequests.push(p); return json({}); }
     return json({ detail: 'not mocked' }, 404);
   });
   return page;
@@ -165,14 +165,17 @@ async function main() {
     await shot(page, 'run-running-7');
 
     /* 3: pausing, then paused (no spinner, resume available). */
+    await page.locator('[data-lab-pause]').focus();
     scenario.run = makeRun({ state: 'pausing', progress: 7 });
     await waitStrip(page, 'Pausing after attempt 8 finishes');
     assert(await page.locator('.lab-status .spin').count() === 1, 'pausing strip still shows the spinner');
+    assert(await page.evaluate(() => document.activeElement?.dataset.key === 'lab-toggle' && document.activeElement.getAttribute('aria-disabled') === 'true'), 'focus moves to the inert Pausing toggle instead of the page');
     scenario.run = makeRun({ state: 'paused', progress: 7 });
     await waitStrip(page, 'Paused after 7 of 15');
     assert(await page.locator('.lab-status .spin').count() === 0, 'paused strip has no spinner');
     assert((await page.locator('.lab-status').innerText()).includes('Resume to continue with attempt 8'), 'paused strip says which attempt resumes');
     assert(await page.locator('[data-lab-resume]').count() === 1, 'Resume button is present while paused');
+    assert(await page.evaluate(() => document.activeElement?.dataset.key === 'lab-toggle' && document.activeElement.hasAttribute('data-lab-resume')), 'focus stays on the toggle once it becomes Resume');
     assert(await page.locator('.lab-tape-pending').count() === 0, 'paused run shows no pending row');
     await shot(page, 'run-paused-7');
 
@@ -188,6 +191,12 @@ async function main() {
     scenario.run = makeRun({ state: 'running', progress: 8 });
     await waitStrip(page, 'Generating attempt 9 of 15');
     assert(await page.evaluate(() => document.activeElement?.hasAttribute('data-lab-pause')), 'Pause keeps focus when progress changes');
+
+    /* Cancel posts only to the Lab route; the Bench cancel handler must not fire. */
+    await page.locator('[data-lab-cancel]').click();
+    await wait(600);
+    assert(report.postRequests.includes('/api/lab/runs/fixture-run/cancel'), 'Lab Cancel posts to the Lab cancel route');
+    assert(!report.postRequests.some(item => item.startsWith('/api/runs/')), 'Lab Cancel never posts to the Bench cancel route');
 
     /* 4: completed. The strip and pending row disappear. */
     scenario.run = makeRun({ state: 'completed', progress: 15 });
@@ -281,6 +290,10 @@ async function main() {
     /* 9, 10: run layout. */
     const completed = { bench: benchSetup(), labSetup: labSetup(), run: makeRun({ state: 'completed', progress: 15 }), runs: [] };
     completed.run.attempts.forEach(item => { item.autoChecks = [{ name: 'Fixture check', pass: true, detail: 'passed' }]; item.autoScore = 50; });
+    completed.run.rollup = [
+      { endpoint: 'Ollama 1', model: 'qwen3.5:4b', field: 'ui', total: 2, ok: 2, failed: 0, auto_score: 41.6, auto_collected: 2, buttons_ok: 1, playable_ok: 0, visuals: 3 },
+      { endpoint: 'Ollama 1', model: 'qwen3.5:4b', field: 'coding', total: 2, ok: 2, failed: 0, auto_score: 100, auto_collected: 1, buttons_ok: 0, playable_ok: 0, visuals: 3 },
+    ];
     page = await newScenario(context, completed);
     await page.setViewportSize({ width: 2000, height: 1000 });
     await page.goto(`${base}/#labrun/fixture-run`, { waitUntil: 'domcontentloaded' });
@@ -288,6 +301,13 @@ async function main() {
     const inspect = await box(page, '.part-inspect');
     let rollup = await box(page, '.part-rollup');
     assert(Math.abs(rollup.y - inspect.bottom) <= 2 && Math.abs(rollup.w - inspect.w) <= 2, '2000px, no preview: measured rollup spans full width below the inspector');
+    /* Measure the text, not the cell box: the cell always runs to the table edge, and its padding sits inside it. */
+    const lastRollupText = await page.evaluate(() => {
+      const range = document.createRange();
+      range.selectNodeContents(document.querySelector('.lab-rollup tbody tr:first-child td:last-child'));
+      return range.getBoundingClientRect().right;
+    });
+    assert(2000 - lastRollupText >= 30, `2000px: Measured here last column keeps the page gutter (${Math.round(2000 - lastRollupText)}px)`);
     await shot(page, 'run-complete-2000-closed');
     await page.locator('.lab-tape [data-lab-preview="1"]').click();
     await page.waitForSelector('.part-preview iframe');
