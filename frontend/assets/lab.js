@@ -23,6 +23,10 @@ const labState = {
   starting: false,
   runs: [],
   runsError: '',
+  runsLoading: false,
+  runsLoaded: false,
+  setupLoading: false,
+  watchError: '',
   active: null,
   activeId: '',
   activeError: '',
@@ -50,12 +54,15 @@ async function labApi(path, options = {}) {
 }
 
 async function loadLabSetup() {
+  labState.setupLoading = true;
   try {
     const setup = await labApi('/setup');
     labState.fields = Array.isArray(setup.fields) ? setup.fields.filter(field => LAB_FIELDS.includes(field)) : [...LAB_FIELDS];
     labState.models = (setup.models || []).filter(entry => entry && entry.name && entry.url && Array.isArray(entry.models));
     labState.ready = true;
-  } catch { /* defaults stay */ }
+  } catch { /* defaults stay */ } finally {
+    labState.setupLoading = false;
+  }
 }
 
 async function saveLabSetup() {
@@ -65,11 +72,15 @@ async function saveLabSetup() {
 }
 
 async function loadLabRuns() {
+  labState.runsLoading = true;
   try {
     labState.runs = await labApi('/runs');
     labState.runsError = '';
   } catch (error) {
     labState.runsError = error.message;
+  } finally {
+    labState.runsLoading = false;
+    labState.runsLoaded = true;
   }
 }
 
@@ -92,6 +103,7 @@ function labRefresh(id) {
       if (labWatcher?.id !== id && labState.activeId !== id) return;
       labState.active = run;
       labState.activeError = '';
+      labState.watchError = '';
       if (LAB_STATES.has(run.state)) {
         labStopWatching();
         await loadLabRuns();
@@ -99,6 +111,7 @@ function labRefresh(id) {
     } catch (error) {
       if (labWatcher?.id !== id && labState.activeId !== id) return;
       labState.activeError = error.message;
+      labState.watchError = error.message;
     }
     if (route().view === 'labrun') render();
   };
@@ -153,6 +166,7 @@ async function labSyncRoute(view, id) {
       labState.pendingChecks.clear();
       labState.checksErrors = {};
       labState.activeError = '';
+      labState.watchError = '';
       render();
       await labOpenForReview(id);
     }
@@ -160,8 +174,11 @@ async function labSyncRoute(view, id) {
     render();
     return;
   }
-  // #lab
+  // #lab: paint the loading state at once, then fill in the saved setup and runs.
   labStopWatching();
+  labState.runsLoading = true;
+  labState.setupLoading = !labState.ready;
+  render();
   if (!labState.ready) await loadLabSetup();
   await loadLabRuns();
   render();
@@ -171,6 +188,7 @@ async function labSyncRoute(view, id) {
 function labList() {
   let body;
   if (labState.runsError) body = `<div class="empty"><p class="error" role="alert">${esc(labState.runsError)}</p></div>`;
+  else if (labState.runsLoading && !labState.runsLoaded) body = '<div class="empty"><p class="lab-loading" role="status"><i class="spin" aria-hidden="true"></i>Loading past lab runs…</p></div>';
   else if (!labState.runs.length) body = '<div class="empty"><p>No lab runs yet. Start one above to build artifacts with your models.</p></div>';
   else {
     const rows = labState.runs.map(run => {
@@ -236,7 +254,7 @@ function labEndpointSection(endpoint) {
   const rows = endpoint.found.map(model => {
     const checked = labHasModel(endpoint.url, model.id);
     return `<li><label class="check">
-      <input type="checkbox" data-lab-model data-url="${esc(endpoint.url)}" data-name="${esc(endpoint.name)}" value="${esc(model.id)}" ${checked ? 'checked' : ''}>
+      <input type="checkbox" data-lab-model data-url="${esc(endpoint.url)}" data-name="${esc(endpoint.name)}" value="${esc(model.id)}" ${checked ? 'checked' : ''} ${labState.setupLoading ? 'disabled' : ''}>
       <code>${esc(model.id)}</code>
       <small>${esc(model.owned_by || '')}</small>
     </label></li>`;
@@ -265,11 +283,10 @@ function labView() {
         !sections ? '<p class="start-hint">Your endpoints list no lab-able models.</p>' : ''}
     </div>`,
     endpoints: sections ? `<div class="pane">${sections}</div>` : '',
-    history: labList(),
     sheet: `<aside class="sheet" aria-label="Lab setup">
       <div class="sheet-block">
         <h2>Fields</h2>
-        <div class="category-grid">${LAB_FIELDS.map(field => `<label class="check"><input type="checkbox" data-lab-field value="${field}" ${labState.fields.includes(field) ? 'checked' : ''}>${LAB_FIELD_LABELS[field]}</label>`).join('')}</div>
+        <div class="category-grid">${LAB_FIELDS.map(field => `<label class="check"><input type="checkbox" data-lab-field value="${field}" ${labState.fields.includes(field) ? 'checked' : ''} ${labState.setupLoading ? 'disabled' : ''}>${LAB_FIELD_LABELS[field]}</label>`).join('')}</div>
         <p>UI builds pages and checks every button. Coding builds a playable game and a sort dashboard. Extras adds a deterministic JSON task graded without a browser.</p>
       </div>
       <div class="sheet-block">
@@ -280,10 +297,12 @@ function labView() {
       <div class="sheet-foot">
         <div class="tally"><span>${labCount() ? plural(labCount(), 'model') : 'No models chosen'}</span><span><b>${labAttemptsCount().toLocaleString()}</b> attempts</span></div>
         ${labState.startError ? `<p class="error" role="alert">${esc(labState.startError)}</p>` : ''}
-        <button id="lab-start" class="button primary" data-lab-start ${labBlocker() || labState.starting ? 'disabled' : ''}>${labState.starting ? '<i class="spin"></i>Starting' : 'Start lab run'}</button>
+        ${labState.setupLoading ? '<p class="note lab-loading" role="status"><i class="spin" aria-hidden="true"></i>Loading saved selection…</p>' : ''}
+        <button id="lab-start" class="button primary" data-lab-start ${labBlocker() || labState.starting || labState.setupLoading ? 'disabled' : ''}>${labState.starting ? '<i class="spin"></i>Starting' : 'Start lab run'}</button>
         ${labBlocker() ? `<p class="note">${esc(labBlocker())}</p>` : ''}
       </div>
     </aside>`,
+    history: labList(),
   };
 }
 
@@ -300,7 +319,7 @@ function labHead(run) {
     </div>
     <div class="run-count">
       <b aria-label="${run.progress} of ${run.total} attempts">${run.progress.toLocaleString()}<span>/${run.total.toLocaleString()}</span></b>
-      ${live ? `${run.state === 'running' ? '<button class="button quiet" data-lab-pause>Pause</button>' : ''}${run.state === 'paused' ? '<button class="button" data-lab-resume>Resume</button>' : ''}<button class="button cancel-run" data-lab-cancel>Cancel lab run</button>` : '<a class="button" href="#lab">New lab run</a>'}
+      ${live ? `${run.state === 'running' ? '<button class="button quiet" data-key="lab-pause" data-lab-pause>Pause</button>' : ''}${run.state === 'paused' ? '<button class="button" data-key="lab-resume" data-lab-resume>Resume</button>' : ''}<button class="button cancel-run" data-key="lab-cancel" data-lab-cancel>Cancel lab run</button>` : '<a class="button" href="#lab">New lab run</a>'}
     </div>
   </header>`;
 }
@@ -321,6 +340,76 @@ function labReviewText(item) {
   return parts.join(' · ') || '—';
 }
 
+/* The backend runs attempts in a fixed order: endpoint, then model, then task.
+   The attempt in flight is therefore the next one after the stored progress. */
+function labInFlight(run) {
+  const total = Number(run.total) || 0;
+  const progress = Number(run.progress) || 0;
+  const fields = Array.isArray(run.config?.fields) ? run.config.fields : [];
+  const tasks = labTasksFor(fields);
+  if (!tasks.length || progress >= total) return null;
+  const models = [];
+  (Array.isArray(run.config?.endpoints) ? run.config.endpoints : []).forEach(endpoint => {
+    (Array.isArray(endpoint?.models) ? endpoint.models : []).forEach(model => models.push({ endpointName: endpoint?.name || '', model }));
+  });
+  const slot = models[Math.floor(progress / tasks.length)];
+  return {
+    number: progress + 1,
+    total,
+    task: tasks[progress % tasks.length],
+    model: slot ? String(slot.model) : '',
+    endpointName: slot ? String(slot.endpointName) : '',
+  };
+}
+
+function labStatus(run) {
+  if (LAB_STATES.has(run.state)) return '';
+  const total = Number(run.total) || 0;
+  const progress = Number(run.progress) || 0;
+  const share = total ? Math.min(100, Math.round(progress * 100 / total)) : 0;
+  const next = labInFlight(run);
+  const where = next ? [next.task.title, next.model, next.endpointName].filter(Boolean).map(esc).join(' · ') : '';
+  let headline;
+  let detail = where;
+  let spinning = true;
+  if (run.state === 'queued') {
+    headline = 'Queued — starting the first attempt';
+    detail = '';
+  } else if (run.state === 'paused') {
+    spinning = false;
+    headline = `Paused after ${progress} of ${total}`;
+    detail = next ? `Resume to continue with attempt ${next.number}${where ? ` (${where})` : ''}` : 'Resume to continue';
+  } else if (run.state === 'pausing') {
+    headline = next ? `Pausing after attempt ${next.number} finishes` : 'Pausing after the current attempt finishes';
+  } else if (total && progress >= total) {
+    headline = 'Finishing up';
+    detail = '';
+  } else if (next) {
+    headline = `Generating attempt ${next.number} of ${total}`;
+  } else {
+    headline = total ? `Generating attempt ${progress + 1} of ${total}` : 'Working…';
+  }
+  const retry = labState.watchError ? '<span class="lab-status-retry">Lost contact with the server. Retrying every few seconds.</span>' : '';
+  const meter = total ? `<span class="meter" role="img" aria-label="${progress} of ${total} attempts finished"><i style="width:${share}%"></i></span>` : '';
+  return `<section class="lab-status" aria-label="Lab run status">
+    <div class="lab-status-line">
+      ${spinning ? '<i class="spin" aria-hidden="true"></i>' : ''}
+      <div class="lab-status-text" role="status">
+        <b>${esc(headline)}</b>
+        ${detail ? `<span>${detail}</span>` : ''}
+        ${retry}
+      </div>
+    </div>
+    ${meter}
+  </section>`;
+}
+
+/* The in-flight attempt gets a non-selectable row while it runs. */
+function labPendingAttempt(run) {
+  if (!['queued', 'running', 'pausing'].includes(run.state)) return null;
+  return labInFlight(run);
+}
+
 function labTape(run) {
   const rows = run.attempts.map(item => {
     const verdict = labVerdictOf(item);
@@ -335,13 +424,31 @@ function labTape(run) {
       <td class="num">${item.field === 'extras' ? '—' : `<button type="button" class="button quiet" data-lab-preview="${item.attempt}" ${item.status === 'ok' ? '' : 'disabled'}>Preview</button>`}</td>
     </tr>`;
   }).join('');
-  const table = rows ? `<div class="table-wrap"><table class="run-table lab-tape">
+  const pending = labPendingAttempt(run);
+  const pendingRow = pending ? `<tr class="lab-tape-pending">
+      <th scope="row"><span class="lab-row-pending">#${pending.number}</span></th>
+      <td class="col-depth">${esc(LAB_FIELD_LABELS[pending.task.field] || pending.task.field)}</td>
+      <td>${esc(pending.task.title)}${pending.model ? `<small> · ${esc(pending.model.split('/').pop())}</small>` : ''}</td>
+      <td><span class="run-state is-live">${run.state === 'queued' ? 'Queued' : 'Generating'}</span></td>
+      <td class="num">—</td>
+      <td class="num lab-review-cell">—</td>
+      <td class="num">—</td>
+    </tr>` : '';
+  const live = !LAB_STATES.has(run.state);
+  let body = '';
+  if (rows || pendingRow) {
+    body = `<div class="table-wrap"><table class="run-table lab-tape">
     <thead><tr><th>#</th><th class="col-depth">Field</th><th>Task</th><th>Status</th><th class="num">Auto</th><th>Your review</th><th>Preview</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`
-    : '<p class="empty">The first artifact appears here as soon as it arrives.</p>';
+    <tbody>${rows}${pendingRow}</tbody></table></div>`;
+  } else if (!live) {
+    body = '<p class="empty">This run ended before any artifact was produced.</p>';
+  }
+  let helper = '';
+  if (run.attempts.length) helper = 'Select a row to review the artifact';
+  else if (live) helper = 'Artifacts appear here as each attempt finishes';
   return `<section aria-label="Lab attempts">
-    <div class="block-head"><h2>Attempts</h2><span>Select a row to review the artifact</span></div>
-    ${table}
+    <div class="block-head"><h2>Attempts</h2><span>${helper}</span></div>
+    ${body}
   </section>`;
 }
 
@@ -390,7 +497,10 @@ function labPreviewFrame(run, item) {
 
 function labInspector(run) {
   const count = run.attempts.length;
-  if (!count) return '<section class="inspect" aria-label="Attempt detail"><div class="block-head"><h2>Artifact</h2></div><p class="empty">The first artifact appears here as soon as it arrives.</p></section>';
+  if (!count) {
+    const live = !LAB_STATES.has(run.state);
+    return `<section class="inspect" aria-label="Attempt detail"><div class="block-head"><h2>Artifact</h2></div>${live ? '<div class="inspect-body"><p class="note">Select an attempt once the first one finishes.</p></div>' : ''}</section>`;
+  }
   const index = labState.attempt !== null && labState.attempt <= count ? labState.attempt : count;
   const item = run.attempts[index - 1];
   const outcomeKey = item.status === 'error' ? 'error' : item.status !== 'ok' ? 'ungraded' : 'match';
@@ -412,8 +522,10 @@ function labInspector(run) {
       <div class="block-head small"><h3>Auto checks</h3><span>${typeof item.autoScore === 'number' ? `${Math.round(item.autoScore)}<small>/100</small>` : 'no score yet'}</span></div>
       <ul class="lab-checks">${labCheckList(item)}</ul>
       ${item.field === 'extras' ? '' : `<div class="block-head small"><h3>Preview</h3></div>
+      <div class="lab-actions">
       ${labState.preview === item.attempt ? '' : `<button type="button" class="button" data-lab-preview="${item.attempt}" ${item.status === 'ok' ? '' : 'disabled'}>Open preview</button>`}
       ${item.status === 'ok' ? `<a class="button" href="/api/lab/artifacts/${esc(run.id)}/${item.attempt}/raw" target="_blank" rel="noopener">Open full preview</a>` : ''}
+      </div>
       ${labState.checksErrors[`${run.id}:${item.attempt}`] ? `<p class="error" role="alert">Checks could not be saved: ${esc(labState.checksErrors[`${run.id}:${item.attempt}`])}</p>${(labState.checksTries.get(`${run.id}:${item.attempt}`) || 0) < 3 ? '<button type="button" class="button quiet" data-lab-check-retry>Retry saving checks</button>' : '<p class="note">Retry limit reached. Reload the artifact preview to collect a fresh result.</p>'}` : ''}
       <div class="block-head small"><h3>Your review</h3></div>`}
       ${labReviewControls(item)}
@@ -449,7 +561,8 @@ function labRunView(id) {
   const run = labState.active?.id === id ? labState.active : null;
   if (!run) {
     return {
-      head: `<header class="page-head"><div><h1>${labState.activeError ? 'Lab run not available.' : 'Opening lab run.'}</h1>${labState.activeError ? `<p class="lead">${esc(labState.activeError)}</p>` : ''}</div></header>`,
+      head: `<header class="page-head"><div><h1>${labState.activeError ? 'Lab run not available.' : 'Opening lab run.'}</h1>${labState.activeError ? `<p class="lead">${esc(labState.activeError)}</p>` : '<p class="lead lab-loading" role="status"><i class="spin" aria-hidden="true"></i>Loading the run from this server.</p>'}</div></header>`,
+      status: '',
       tape: labState.activeError ? '<div class="empty"><a class="button" href="#lab">Back to the lab</a></div>' : '',
       inspect: '',
       preview: '',
@@ -458,7 +571,7 @@ function labRunView(id) {
   }
   const currentAttempt = labSelectedAttemptFor(run);
   const item = currentAttempt ? run.attempts[currentAttempt - 1] : null;
-  return { head: labHead(run), tape: labTape(run), inspect: labInspector(run), preview: item ? labPreviewFrame(run, item) : '', rollup: labRollup(run) };
+  return { head: labHead(run), status: labStatus(run), tape: labTape(run), inspect: labInspector(run), preview: item ? labPreviewFrame(run, item) : '', rollup: labRollup(run) };
 }
 
 function labSelectedAttemptFor(run) {
