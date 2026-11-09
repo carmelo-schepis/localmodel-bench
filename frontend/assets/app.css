@@ -432,25 +432,44 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 .chart-warn { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
 
 /* Lab */
-main[data-layout="lab"] { display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 28vw, 440px); }
-main[data-layout="lab"] .part-history { grid-column: 1 / -1; }
-main[data-layout="labrun"] { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); grid-template-rows: auto auto auto 1fr; }
-main[data-layout="labrun"] .part-head, main[data-layout="labrun"] .part-inspect { min-width: 0; }
-main[data-layout="labrun"] .part-tape, main[data-layout="labrun"] .part-head { grid-column: 1 / -1; }
-main[data-layout="labrun"] .part-preview { grid-column: 2; grid-row: 3; min-width: 0; }
-main[data-layout="labrun"] .part-rollup { grid-column: 2; grid-row: 4; border-left: 1px solid var(--line); }
+/* Setup: title, models and past runs in the left column; the setup rail runs beside them.
+   Narrower than 901px the parts stack in DOM order (see the 900px query). */
+@media (min-width: 901px) {
+  main[data-layout="lab"] { display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 28vw, 440px); grid-template-rows: auto auto 1fr; align-items: start; }
+  main[data-layout="lab"] .part-head { grid-column: 1; grid-row: 1; min-width: 0; }
+  main[data-layout="lab"] .part-endpoints { grid-column: 1; grid-row: 2; min-width: 0; }
+  main[data-layout="lab"] .part-sheet { grid-column: 2; grid-row: 1 / 4; position: sticky; top: var(--topbar); height: auto; max-height: calc(100dvh - var(--topbar)); overflow-y: auto; }
+  main[data-layout="lab"] .part-history { grid-column: 1; grid-row: 3; align-self: start; min-width: 0; }
+  main[data-layout="lab"] .part-head > .pane { min-height: 0; padding-bottom: 28px; }
+  main[data-layout="lab"] .part-endpoints > .pane { min-height: 0; padding-top: 0; padding-bottom: 0; }
+  main[data-layout="lab"] .part-endpoints .endpoint:first-child { margin-top: 0; }
+}
+
+/* Run: heading, status and attempts span the full width. Wider than 1320px the inspector sits left
+   and Measured here sits right. When no preview is open, the rollup spans the full width below
+   the inspector, so no empty column is left beside it. Narrower screens stack in DOM order. */
+@media (min-width: 1321px) {
+  main[data-layout="labrun"] { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); grid-template-rows: auto auto auto auto 1fr; align-items: start; }
+  main[data-layout="labrun"] .part-head, main[data-layout="labrun"] .part-status, main[data-layout="labrun"] .part-tape { grid-column: 1 / -1; min-width: 0; }
+  main[data-layout="labrun"] .part-inspect { grid-column: 1; grid-row: 4; min-width: 0; border-left: 0; }
+  main[data-layout="labrun"] .part-preview { grid-column: 1; grid-row: 5; min-width: 0; align-self: start; }
+  main[data-layout="labrun"] .part-preview:empty { display: none; }
+  main[data-layout="labrun"] .part-rollup { grid-column: 2; grid-row: 4 / 6; min-width: 0; border-left: 1px solid var(--line); }
+  main[data-layout="labrun"]:has(.part-preview:empty) .part-inspect { grid-column: 1 / -1; }
+  main[data-layout="labrun"]:has(.part-preview:empty) .part-rollup { grid-column: 1 / -1; grid-row: 5; border-left: 0; border-top: 1px solid var(--line); }
+}
 
 .lab-task-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
 .lab-task-list li small { color: var(--ink-3); font-size: 12px; }
 .lab-history { border-top: 1px solid var(--line); margin-top: 32px; }
-.lab-history .block-head { padding-top: 28px; }
+.lab-history .block-head { padding-top: 24px; }
 .lab-row-open { padding: 0; background: none; border: 0; cursor: pointer; font: inherit; }
 
 .lab-checks { display: grid; gap: 8px; margin-top: 12px; }
 .lab-check {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: baseline;
-  justify-content: space-between;
   gap: 8px 16px;
   padding: 9px 14px;
   border: 1px solid var(--line);
@@ -486,6 +505,19 @@ main[data-layout="labrun"] .part-rollup { grid-column: 2; grid-row: 4; border-le
 .block-head.small { padding: 22px 0 8px; }
 .block-head.small h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .warning { margin-top: 12px; color: var(--ink-2); font-size: 13px; }
+
+/* Live status strip and loading states. Monochrome; the text carries the state, not the spinner. */
+.lab-status { display: grid; gap: 10px; padding: 16px var(--gutter) 14px; border-bottom: 1px solid var(--line); }
+.lab-status-line { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.lab-status-line .spin { flex: none; margin-top: 5px; }
+.lab-status-text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; min-width: 0; }
+.lab-status-text b { font-weight: 600; }
+.lab-status-text span { color: var(--ink-2); overflow-wrap: anywhere; }
+.lab-status-text .lab-status-retry { color: var(--ink-3); font-size: 13px; }
+.lab-loading { display: flex; align-items: center; gap: 10px; margin-top: 0; color: var(--ink-2); }
+.lab-loading .spin { flex: none; }
+.lab-tape-pending th, .lab-tape-pending td, .lab-row-pending { color: var(--ink-2); }
+.lab-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 
 /* Narrower screens */
 @media (max-width: 1320px) {
