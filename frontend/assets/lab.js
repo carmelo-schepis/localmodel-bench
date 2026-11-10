@@ -447,7 +447,7 @@ function labTape(run) {
   let body = '';
   if (rows || pendingRow) {
     body = `<div class="table-wrap"><table class="run-table lab-tape">
-    <thead><tr><th>#</th><th class="col-depth">Field</th><th>Task</th><th>Status</th><th class="num">Auto</th><th>Your review</th><th>Preview</th></tr></thead>
+    <thead><tr><th>#</th><th class="col-depth">Field</th><th>Task</th><th>Status</th><th class="num">Auto</th><th class="num">Your review</th><th class="num">Preview</th></tr></thead>
     <tbody>${rows}${pendingRow}</tbody></table></div>`;
   } else if (!live) {
     body = '<p class="empty">This run ended before any artifact was produced.</p>';

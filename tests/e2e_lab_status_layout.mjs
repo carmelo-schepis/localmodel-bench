@@ -361,6 +361,96 @@ async function main() {
     assert(!(await page.locator('.lab-history').innerText()).includes('Loading past lab runs'), 'past runs loading state clears when loaded');
     await page.close();
 
+    /* 12: attempts table alignment, Preview text vs placeholder, extras check label. */
+    const aligned = makeRun({ state: 'completed', progress: 15 });
+    aligned.attempts.forEach(item => { item.autoChecks = []; item.autoScore = null; });
+    aligned.attempts[0].autoScore = 41.6;
+    aligned.attempts[0].autoChecks = [{ name: 'Fixture check', pass: true, detail: 'passed' }];
+    aligned.attempts[0].review = { visuals: 4, buttons: 'yes' };
+    aligned.attempts[1].status = 'error';
+    aligned.attempts[4].autoScore = 0;
+    aligned.attempts[4].autoChecks = [{ name: 'Exact-value check', pass: false, detail: 'Not valid JSON, or does not match the expected totals' }];
+    const alignedScenario = { bench: benchSetup(), labSetup: labSetup(), run: aligned, runs: [] };
+    const measureTable = () => {
+      const table = document.querySelector('.lab-tape');
+      const right = node => { const range = document.createRange(); range.selectNodeContents(node); return range.getBoundingClientRect().right; };
+      const heads = [...table.querySelectorAll('thead th')];
+      const index = name => heads.findIndex(th => th.textContent.trim() === name);
+      const cols = { auto: index('Auto'), review: index('Your review'), preview: index('Preview') };
+      const headRight = Object.fromEntries(Object.entries(cols).map(([key, i]) => [key, right(heads[i])]));
+      const rows = [...table.querySelectorAll('tbody tr:not(.lab-tape-pending)')].map(row => {
+        const button = row.cells[cols.preview].querySelector('button');
+        return {
+          attempt: row.querySelector('[data-lab-select]')?.dataset.labSelect,
+          auto: right(row.cells[cols.auto]),
+          review: right(row.cells[cols.review]),
+          // Button text ends at the content edge; the margin pulls the box, not the text.
+          preview: button ? right(button) : right(row.cells[cols.preview]),
+          placeholder: !button,
+          previewDisabled: button ? button.disabled : null,
+        };
+      });
+      return { headRight, rows };
+    };
+    for (const width of [1440, 1920, 2000]) {
+      page = await newScenario(context, alignedScenario);
+      await page.setViewportSize({ width, height: 1000 });
+      await page.goto(`${base}/#labrun/fixture-run`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.lab-tape tbody tr');
+      const { headRight, rows } = await page.evaluate(measureTable);
+      for (const key of ['auto', 'review', 'preview']) {
+        const worst = Math.max(...rows.map(row => Math.abs(headRight[key] - row[key])));
+        assert(worst <= 2, `${width}px: "${key}" header and cells right-align within 2px (worst ${worst.toFixed(1)}px)`);
+      }
+      const buttonRows = rows.filter(row => !row.placeholder);
+      const dashRows = rows.filter(row => row.placeholder);
+      assert(buttonRows.length > 0 && dashRows.length > 0, `${width}px: fixture has both Preview buttons and "—" placeholders`);
+      const textEdge = buttonRows[0].preview;
+      const dashWorst = Math.max(...dashRows.map(row => Math.abs(row.preview - textEdge)));
+      assert(dashWorst <= 2, `${width}px: "—" placeholders end with the Preview button text (worst ${dashWorst.toFixed(1)}px)`);
+      assert(rows.find(row => row.attempt === '2').previewDisabled === true, `${width}px: non-ok attempt keeps its Preview button disabled`);
+      if (width === 1920) await shot(page, 'align-1920');
+
+      if (width === 2000) {
+        const focus = await page.evaluate(() => {
+          const button = document.querySelector('.lab-tape [data-lab-preview="1"]');
+          button.focus();
+          const box = button.getBoundingClientRect();
+          const wrap = button.closest('.table-wrap').getBoundingClientRect();
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          return {
+            focused: document.activeElement === button,
+            inside: box.left >= wrap.left && box.right <= wrap.right && box.top >= wrap.top && box.bottom <= wrap.bottom,
+            clickable: hit === button || button.contains(hit),
+          };
+        });
+        assert(focus.focused && focus.inside && focus.clickable, '2000px: focused Preview button is inside its scroll area and clickable');
+
+        await page.locator('.lab-tape [data-lab-select="5"]').click();
+        await page.waitForFunction(() => [...document.querySelectorAll('.lab-check')].some(el => el.textContent.includes('Exact-value check')), null, { timeout: 4000 });
+        const checkText = await page.locator('.lab-check').first().innerText();
+        assert(checkText.includes('Exact-value check') && checkText.includes('Not valid JSON, or does not match the expected totals'), '2000px: extras inspector shows the exact-value check and fail detail');
+        assert(!checkText.includes('Deterministic') && !checkText.includes('stored at generation'), '2000px: old extras check label is gone');
+        const extrasRow = await page.locator('.lab-tape tr', { has: page.locator('[data-lab-select="5"]') }).innerText();
+        // innerText reflects the status pill's CSS text-transform, so compare case-insensitively.
+        assert(extrasRow.toLowerCase().includes('check failed'), '2000px: extras row still reads "Check failed"');
+
+        await page.locator('.lab-tape [data-lab-preview="1"]').click();
+        await page.waitForSelector('.part-preview iframe');
+        assert(await page.locator('.part-preview iframe').count() === 1, '2000px: UI Preview still opens');
+        await shot(page, 'align-2000');
+      }
+      await page.close();
+    }
+
+    page = await newScenario(context, alignedScenario);
+    await page.setViewportSize({ width: 390, height: 900 });
+    await page.goto(`${base}/#labrun/fixture-run`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.lab-tape tbody tr');
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), '390px attempts table: no page-level horizontal scroll');
+    await shot(page, 'align-390');
+    await page.close();
+
     report.finishedAt = new Date().toISOString();
     const unexpectedConsole = report.consoleErrors;
     assert(report.pageErrors.length === 0, 'no page errors');
