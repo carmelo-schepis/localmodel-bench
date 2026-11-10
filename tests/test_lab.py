@@ -439,6 +439,35 @@ class SerializationTests(unittest.TestCase):
             lab.serialize_lab_run('ghost')
         self.assertEqual(caught.exception.status_code, 404)
 
+    def test_extras_checks_describe_the_exact_value_result(self):
+        lab.insert_run('extras', '2026-11-10T00:00:00Z', run_config())
+        with lab.connect_db() as db:
+            db.execute("UPDATE lab_runs SET state='completed', progress=3, total=3 WHERE id='extras'")
+            rows = (
+                (1, 'ok', '{"score": 100.0}'),
+                (2, 'ok', '{"score": 0.0}'),
+                (3, 'error', '{}'),
+            )
+            for attempt, status, auto in rows:
+                db.execute('INSERT INTO lab_results(run_id,attempt,endpoint,model,field,task,prompt,html,status,auto) '
+                           "VALUES('extras',?,'Ollama','gemma3:1b','extras','json','?',NULL,?,?)",
+                           (attempt, status, auto))
+        attempts = {item['attempt']: item for item in lab.serialize_lab_run('extras')['attempts']}
+
+        passed = attempts[1]['autoChecks']
+        self.assertEqual(passed, [{'name': 'Exact-value check', 'pass': True, 'detail': 'Matches the expected totals'}])
+        self.assertEqual(attempts[1]['autoScore'], 100.0)
+
+        failed = attempts[2]['autoChecks']
+        self.assertEqual(failed, [{'name': 'Exact-value check', 'pass': False,
+                                   'detail': 'Not valid JSON, or does not match the expected totals'}])
+        self.assertEqual(attempts[2]['autoScore'], 0.0)
+
+        unmeasured = attempts[3]['autoChecks']
+        self.assertEqual(unmeasured, [{'name': 'Exact-value check', 'pass': None,
+                                       'detail': 'Not measured: no usable model response'}])
+        self.assertIsNone(attempts[3]['autoScore'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -522,6 +522,9 @@ main[data-layout] .score.is-failed b { color: var(--signal); }
 /* Measured here: the last column keeps the page gutter. The shared .scores cell padding would
    otherwise win, since it is declared later and sets 12px on every cell. */
 main[data-layout="labrun"] .lab-rollup :is(th, td):last-child { padding-right: var(--gutter); }
+/* Measured here: the quiet Preview button's 10px side padding would push its text left of the
+   "—" placeholders in the same column. Pull the button back so both end at the cell edge. */
+main[data-layout="labrun"] .lab-tape td.num .button.quiet { margin-right: -10px; }
 
 /* Narrower screens */
 @media (max-width: 1320px) {
